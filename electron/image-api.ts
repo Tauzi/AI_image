@@ -57,6 +57,7 @@ interface GenerateImageInput {
   ratio: string;
   resolution: string;
   references: AssetRecord[];
+  onTaskAccepted?: (kind: 'generations' | 'edits', taskId: string) => void;
 }
 
 interface GeneratedImage {
@@ -88,6 +89,16 @@ function apiAspectRatio(value: string): string {
   const longShortRatio = Math.max(width, height) / Math.min(width, height);
   if (longShortRatio > 3) throw new Error(`非法生图比例：${value}，长短边比例不能超过 3:1`);
   return `${width}:${height}`;
+}
+
+function apiExactSize(aspectRatio: string): string {
+  const presets: Record<string, string> = {
+    '1:1': '1024x1024',
+    '3:4': '768x1024',
+    '9:16': '720x1280',
+    '16:9': '1280x720',
+  };
+  return presets[aspectRatio] ?? aspectRatio;
 }
 
 function endpoint(kind: 'generations' | 'edits', taskId?: string): string {
@@ -183,6 +194,7 @@ async function postWithFixedBody(
   headers: Record<string, string>,
   body: string | Buffer,
   concurrencyLimit: number,
+  onTaskAccepted?: (kind: 'generations' | 'edits', taskId: string) => void,
 ): Promise<GeneratedImage> {
   let lastError: unknown;
   for (let attempts = 1; attempts <= MAX_POST_ATTEMPTS; attempts += 1) {
@@ -197,6 +209,7 @@ async function postWithFixedBody(
         return readApiBody(response);
       });
       const immediate = await downloadResult(responseBody);
+      if (!immediate && responseBody.id) onTaskAccepted?.(kind, responseBody.id);
       const result = immediate ?? (responseBody.id ? await pollTask(kind, responseBody.id, { Authorization: headers.Authorization }) : null);
       if (!result) throw new Error('生图服务未返回任务 ID 或可识别的图片数据');
       return { ...result, attempts };
@@ -212,6 +225,7 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   const headers = { Authorization: `Bearer ${input.apiKey}` };
   const isAsync = input.settings.invocationMode === 'async';
   const aspectRatio = apiAspectRatio(input.ratio);
+  const size = apiExactSize(aspectRatio);
   const quality = input.resolution.toUpperCase() === '2K' ? 'high' : 'medium';
 
   if (input.references.length === 0) {
@@ -221,9 +235,9 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
       n: 1,
       prompt: input.prompt,
       quality,
-      aspect_ratio: aspectRatio,
+      size,
     });
-    return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.settings.concurrencyLimit);
+    return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.settings.concurrencyLimit, input.onTaskAccepted);
   }
 
   const boundary = `----MufenImageAI${randomUUID().replace(/-/g, '')}`;
@@ -233,10 +247,16 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
     ['prompt', input.prompt],
     ['n', '1'],
     ['quality', quality],
-    ['aspect_ratio', aspectRatio],
+    ['size', size],
   ], input.references);
   return postWithFixedBody('edits', {
     ...headers,
     'Content-Type': `multipart/form-data; boundary=${boundary}`,
-  }, body, input.settings.concurrencyLimit);
+  }, body, input.settings.concurrencyLimit, input.onTaskAccepted);
+}
+
+export async function resumeImageTask(kind: 'generations' | 'edits', taskId: string, apiKey: string): Promise<GeneratedImage> {
+  if (!apiKey) throw new Error('卡密缺失，无法恢复异步任务查询');
+  const result = await pollTask(kind, taskId, { Authorization: `Bearer ${apiKey}` });
+  return { ...result, attempts: 1 };
 }

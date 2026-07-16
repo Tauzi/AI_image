@@ -56,6 +56,7 @@ export interface GenerationTask {
   queuePresetId?: string;
   useSharedPrompt?: boolean;
   stampPostProcess?: StampPostProcess;
+  detailAssets?: AssetRecord[];
 }
 
 export interface PromptTemplate {
@@ -106,7 +107,7 @@ export interface GenerationRecord {
   taskName: string;
   source: GenerationSource;
   batchPrefix: string;
-  status: 'success' | 'error';
+  status: 'pending' | 'success' | 'error';
   prompt: string;
   model: string;
   ratio: string;
@@ -116,6 +117,10 @@ export interface GenerationRecord {
   durationMs: number;
   attempts: number;
   createdAt: string;
+  remoteTaskId?: string;
+  remoteKind?: 'generations' | 'edits';
+  outputBaseName?: string;
+  stampPostProcess?: StampPostProcess;
 }
 
 export interface BatchRecord {

@@ -39,6 +39,7 @@ body,
 body {
   min-width: 920px;
   background: var(--canvas);
+  font-size: 14px;
 }
 
 .settings-lock-page {
@@ -653,6 +654,8 @@ button:disabled {
   height: 100%;
   object-fit: cover;
 }
+
+.upload-slot img { object-fit: contain; background: #f3f6f9; }
 
 .remove-image {
   position: absolute;
@@ -1724,7 +1727,7 @@ textarea:focus {
   width: 50px;
   height: 50px;
   min-height: 50px;
-  object-fit: cover;
+  object-fit: contain;
   border-radius: 5px;
 }
 
@@ -3488,6 +3491,98 @@ textarea:focus {
   .detail-task-grid {
     grid-template-columns: 220px minmax(0, 1fr);
   }
+}
+
+/* Readability and unified async generation feedback */
+.chip, .recipe-tags button, .queue-setting-chips button, .tag-chip,
+.dimension-chip, .recipe-category header, .field-label, .upload-field > span,
+.task-result-item footer, .detail-reference-column > label, .detail-prompt-column small,
+.node-settings label, .node-settings input, .node-settings select {
+  font-size: 12px;
+}
+.recipe-tags button, .chip { min-height: 32px; padding: 6px 11px; }
+.disabled-tags { opacity: .42; pointer-events: none; filter: grayscale(.35); }
+.generation-placeholder .result-image-wrap,
+.standalone-result-empty.generation-placeholder {
+  display: grid; min-height: 190px; place-items: center; align-content: center; gap: 9px;
+  color: #1786df; background: linear-gradient(135deg, #f2f8ff, #e8f4ff);
+}
+.generation-placeholder span { color: var(--muted); font-size: 12px; }
+.detail-assets {
+  grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr;
+  align-items: center; gap: 7px; padding-top: 4px;
+}
+.detail-assets > small { color: var(--muted); }
+.detail-assets > div { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 7px; }
+.detail-assets > div > span {
+  position: relative; width: 68px; height: 68px; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 9px; background: #f4f7fa;
+}
+.detail-assets img { width: 100%; height: 100%; object-fit: contain; }
+.detail-assets span button {
+  position: absolute; top: 3px; right: 3px; display: grid; width: 20px; height: 20px;
+  padding: 0; place-items: center; border: 0; border-radius: 50%; background: rgba(255,255,255,.92);
+}
+
+/* Template queue uses intentionally larger controls for desktop readability. */
+.queue-tags-card > header h2,
+.garment-queue-card > header h2,
+.template-queue-settings h3 { font-size: 15px !important; }
+.queue-tags-card > header p,
+.garment-queue-card > header p,
+.template-queue-settings small { font-size: 12px !important; }
+.queue-tag-section > header { min-height: 42px; height: auto; padding: 6px 14px; }
+.queue-tag-section > header strong { font-size: 14px !important; }
+.queue-tag-section > header button { font-size: 13px !important; }
+.queue-tag-section > div { gap: 9px; padding: 12px 14px; }
+.queue-tag-section > div button,
+.queue-setting-chips button,
+.queue-model-options button {
+  min-height: 36px !important;
+  padding: 6px 13px !important;
+  border-radius: 18px;
+  font-size: 14px !important;
+  line-height: 1.25;
+}
+.template-queue-settings label,
+.queue-direction-grid label,
+.garment-queue-uploads .upload-field > span,
+.garment-queue-item > label { font-size: 13px !important; }
+.template-queue-settings input,
+.template-queue-settings select { min-height: 40px; font-size: 14px; }
+.garment-queue-uploads .upload-slot { height: 96px; min-height: 96px; }
+.garment-queue-uploads .upload-slot img,
+.queue-shared-uploads .upload-slot img,
+.reference-panel .upload-slot img,
+.detail-reference-column .upload-slot img {
+  width: 100% !important;
+  height: 100% !important;
+  padding: 4px;
+  object-fit: contain !important;
+  object-position: center !important;
+  background: #f3f6f9;
+}
+
+/* Never crop uploaded references: center the real image at its natural ratio. */
+.upload-slot.reference-contain {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: #f3f6f9;
+}
+.upload-slot.reference-contain > img {
+  position: absolute !important;
+  inset: 0 !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: calc(100% - 8px) !important;
+  max-height: calc(100% - 8px) !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: auto !important;
+  padding: 0 !important;
+  object-fit: fill !important;
+  object-position: center !important;
 }
 
 @media (max-width: 1250px) {

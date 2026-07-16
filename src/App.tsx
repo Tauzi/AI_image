@@ -215,7 +215,11 @@ function LocalImage({ asset, path, alt }: { asset?: AssetRecord; path?: string; 
     };
   }, [localPath, source]);
   if (!source) return <div className="image-loading"><LoaderCircle size={18} className="spin" /></div>;
-  return <img src={source} alt={alt} />;
+  return <img src={source} alt={alt} onContextMenu={(event) => {
+    if (!localPath) return;
+    event.preventDefault();
+    void window.imageStudio.showImageContextMenu(localPath, asset?.name || `${alt}.png`);
+  }} />;
 }
 
 function ImagePreviewModal({ record, onClose }: { record: GenerationRecord; onClose: () => void }) {
@@ -331,7 +335,7 @@ function UploadSlot({
   return (
     <div className="upload-field">
       <span>{label}{required && <b> *</b>}</span>
-      <button className={asset ? 'upload-slot filled' : 'upload-slot'} onClick={onPick} type="button" title={`选择${label}`}>
+      <button className={asset ? 'upload-slot filled reference-contain' : 'upload-slot'} onClick={onPick} type="button" title={`选择${label}`}>
         {asset ? <LocalImage asset={asset} alt={label} /> : <Plus size={22} />}
       </button>
       {asset && (
@@ -488,7 +492,7 @@ function TaskResults({ records }: { records: GenerationRecord[] }) {
     <section className="task-results">
       <header><div><Images size={15} /><strong>生成结果</strong><span>{records.filter((record) => record.status === 'success').length} 张图片</span></div></header>
       <div className="task-result-grid">
-        {visible.map((record) => record.status === 'success' ? <article key={record.id} className="task-result-item" onDoubleClick={() => window.imageStudio.revealFile(record.outputPath)}>
+        {visible.map((record) => record.status === 'pending' ? <article key={record.id} className="task-result-item generation-placeholder"><div className="result-image-wrap"><LoaderCircle size={28} className="spin" /><strong>生成中</strong><span>{record.ratio} · {record.resolution}</span></div></article> : record.status === 'success' ? <article key={record.id} className="task-result-item" onDoubleClick={() => window.imageStudio.revealFile(record.outputPath)}>
           <div className="result-image-wrap"><LocalImage path={record.outputPath} alt={record.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={(event) => { event.stopPropagation(); setPreview(record); }}><Maximize2 size={15} /></button></div>
           <footer><span>{record.batchPrefix} · {record.ratio} · {record.resolution}</span><button type="button" onClick={() => window.imageStudio.revealFile(record.outputPath)}>定位文件</button></footer>
         </article> : <article key={record.id} className="task-result-error"><CircleAlert size={16} /><div><strong>生成失败</strong><span>{record.error}</span></div></article>)}
@@ -534,6 +538,8 @@ function TemplateQueuePage({
     return sum + output.frontQuantity * frontRatios.length + output.sideQuantity * sideRatios.length;
   }, 0);
   const missingFaceCount = readyTasks.filter((task) => !frontForTask(task)).length;
+  const pendingCount = snapshot.generations.filter((record) => record.source === 'template' && record.status === 'pending').length;
+  const generationBusy = generating || pendingCount > 0;
 
   const updateTasks = (updater: (task: GenerationTask, index: number) => GenerationTask) => {
     onDraft({ ...draft, tasks: draft.tasks.map(updater) });
@@ -723,7 +729,7 @@ function TemplateQueuePage({
         <section><h3>侧面比例（可多选）</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.sideRatios, draft.queueOutput.sideRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatios: values, sideRatio: values[0] } })} /></section>
         <section><h3>生成模型</h3><div className="queue-model-options"><button type="button" className="selected">{draft.model}</button></div><input value={draft.model} onChange={(event) => onDraft({ ...draft, model: event.target.value })} /></section>
         <section><h3>批次标签</h3><input value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></section>
-        <button type="button" className="primary queue-start-button" disabled={generating || readyTasks.length === 0 || missingFaceCount > 0 || total === 0} onClick={onGenerate}>{generating ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{generating ? '提交中' : `开始生成 ${total} 张`}</button>
+        <button type="button" className="primary queue-start-button" disabled={generationBusy || readyTasks.length === 0 || missingFaceCount > 0 || total === 0} onClick={onGenerate}>{generationBusy ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{generating ? '提交中' : generationBusy ? `模板队列生成中（剩余 ${pendingCount} 张）` : `开始生成 ${total} 张`}</button>
         {missingFaceCount > 0 && <p className="queue-required-tip">有 {missingFaceCount} 款缺少共享或独立预设的正面人脸图</p>}
       </aside>
     </div>
@@ -753,6 +759,9 @@ function StudioPage({
   const visibleTasks = draft.mode === 'single' ? draft.tasks.slice(0, 1) : draft.tasks;
   const outputRatios = normalizedGenerationRatios(draft.outputRatios, visibleTasks[0]?.ratio ?? '3:4');
   const total = visibleTasks.reduce((sum, task) => sum + task.quantity, 0) * outputRatios.length;
+  const currentSource = draft.mode === 'single' ? 'single' : 'batch';
+  const pendingCount = snapshot.generations.filter((record) => record.source === currentSource && record.status === 'pending').length;
+  const generationBusy = generating || pendingCount > 0;
   const updateTask = (id: string, task: GenerationTask) => onDraft({ ...draft, tasks: draft.tasks.map((item) => item.id === id ? task : item) });
   const addTask = () => onDraft({ ...draft, tasks: [...draft.tasks, createTask(draft.tasks.length + 1, snapshot.tagGroups[0])] });
   const cloneTask = (task: GenerationTask) => onDraft({ ...draft, tasks: [...draft.tasks, { ...task, id: newId(), name: `${task.name} 副本` }] });
@@ -805,9 +814,9 @@ function StudioPage({
         <div className="field-label output-resolution-label">输出分辨率</div>
         <ChipGroup values={['1K', '2K']} value={visibleTasks[0]?.resolution ?? '1K'} onChange={(value) => updateAllOutput('resolution', value)} />
         {draft.mode === 'batch' && <button type="button" className="secondary wide" onClick={addTask}><Plus size={16} />新增任务</button>}
-        <button type="button" className="primary wide" disabled={generating || total === 0} onClick={onGenerate}>
-          {generating ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}
-          {generating ? '提交中' : `开始全部生成（${total} 张）`}
+        <button type="button" className="primary wide" disabled={generationBusy || total === 0} onClick={onGenerate}>
+          {generationBusy ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}
+          {generating ? '提交中' : generationBusy ? `${draft.mode === 'single' ? '单图' : '多图'}生成中（剩余 ${pendingCount} 张）` : `开始全部生成（${total} 张）`}
         </button>
         <div className="batch-summary">
           <span>任务</span><strong>{visibleTasks.length}</strong>
@@ -854,8 +863,11 @@ function WorkbenchPage({
   const [showResult, setShowResult] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [previewRecord, setPreviewRecord] = useState<GenerationRecord | null>(null);
+  const [freeMode, setFreeMode] = useState(false);
 
-  const iterationRecords = snapshot.generations.filter((record) => record.status === 'success' && record.source === 'workbench').slice(0, 12);
+  const workbenchRecords = snapshot.generations.filter((record) => record.source === 'workbench').slice(0, 12);
+  const iterationRecords = workbenchRecords.filter((record) => record.status === 'success');
+  const pendingRecord = workbenchRecords.find((record) => record.status === 'pending');
   const selectedRecord = showResult ? iterationRecords.find((record) => record.id === selectedRecordId) ?? iterationRecords[0] : undefined;
 
   useEffect(() => {
@@ -874,6 +886,7 @@ function WorkbenchPage({
   }), [running]);
 
   const selectTag = (category: TagCategory, tagName: string) => {
+    if (freeMode) return;
     const next = { ...selections, [category.name]: tagName };
     setSelections(next);
     setPrompt(buildWorkbenchPrompt(activeGroup, activeSubcategory, next));
@@ -903,7 +916,7 @@ function WorkbenchPage({
       references: { garment: activeReference ?? null, side: null, face: null },
       dimensions: selections,
       direction: '正面',
-      category: activeSubcategory?.name ?? activeGroup?.name ?? '自由创作',
+      category: freeMode ? '自由生图' : activeSubcategory?.name ?? activeGroup?.name ?? '自由创作',
       ratio,
       resolution,
       quantity: 1,
@@ -947,13 +960,19 @@ function WorkbenchPage({
           <div><h2>创作配方</h2><p>{Object.keys(selections).length} 个维度已选择</p></div>
           <span>自动替换</span>
         </div>
+        <button type="button" className={freeMode ? 'secondary wide selected' : 'secondary wide'} onClick={() => {
+          setFreeMode((value) => !value);
+          setSelections({});
+          if (!freeMode) setPrompt('');
+          else setPrompt(buildWorkbenchPrompt(activeGroup, activeSubcategory, {}));
+        }}><WandSparkles size={15} />自由生图固定模式</button>
         <div className="recipe-groups">
           {groups.map((group) => <button type="button" key={group.id} className={activeGroup?.id === group.id ? 'selected' : ''} onClick={() => { setSelectedGroupId(group.id); setSelectedSubcategoryId(group.subcategories[0]?.id ?? ''); }}>{group.name}</button>)}
         </div>
         <div className="recipe-subcategories">
           {activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={activeSubcategory?.id === subcategory.id ? 'selected' : ''} onClick={() => setSelectedSubcategoryId(subcategory.id)}>{subcategory.name}</button>)}
         </div>
-        <div className="recipe-scroll">
+        <div className={freeMode ? 'recipe-scroll disabled-tags' : 'recipe-scroll'}>
           {categories.map((category) => (
             <section className="recipe-category" key={category.id}>
               <header><strong>{category.name}</strong><span>{selections[category.name] || '未选择'}</span></header>
@@ -993,7 +1012,7 @@ function WorkbenchPage({
               <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
               <div className="node-settings">
                 <label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
-                <label>画幅<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>16:9</option></select></label>
+                <label>画幅<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label>
                 <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label>
               </div>
               {reference && <div className="node-reference"><LocalImage asset={reference} alt="迭代参考图" /><span>当前参考</span><button type="button" onClick={() => setReference(null)} title="移除参考图"><X size={13} /></button></div>}
@@ -1003,7 +1022,7 @@ function WorkbenchPage({
 
             <section className="canvas-node result-node">
               <header><span>生成结果</span><small>{iterationRecords.length} 次迭代</small></header>
-              {selectedRecord ? <>
+              {pendingRecord ? <div className="result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong><span>{pendingRecord.ratio} · {pendingRecord.resolution}</span></div> : selectedRecord ? <>
                 <div className="result-preview"><LocalImage path={selectedRecord.outputPath} alt={selectedRecord.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={() => setPreviewRecord(selectedRecord)}><Maximize2 size={16} /></button></div>
                 <div className="result-actions">
                   <span>{selectedRecord.ratio} · {selectedRecord.model}</span>
@@ -1176,6 +1195,7 @@ function StampPage({
   const [model, setModel] = useState(snapshot.settings.defaultModel);
   const [running, setRunning] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<GenerationRecord | null>(null);
+  const [previewRecord, setPreviewRecord] = useState<GenerationRecord | null>(null);
   const stampPrompt = draft.stampPrompt || DEFAULT_STAMP_PROMPT;
   const stageRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<null | { mode: 'move' | 'resize'; startX: number; startY: number; start: typeof placement; width: number }>(null);
@@ -1288,7 +1308,7 @@ function StampPage({
     }
   };
   const records = snapshot.generations.filter((record) => record.source === 'stamp');
-  const displayedRecord = selectedRecord ?? records.find((record) => record.status === 'success') ?? null;
+  const displayedRecord = selectedRecord ?? records[0] ?? null;
 
   return (
     <div className="stamp-page">
@@ -1313,12 +1333,12 @@ function StampPage({
               </div>
             </main>
           </div>
-          {displayedRecord && <section className="standalone-result stamp-inline-result"><header><h3>生成结果</h3><span>{displayedRecord.batchPrefix}</span></header><div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="secondary" onClick={() => window.imageStudio.revealFile(displayedRecord.outputPath)}><FolderOpen size={15} />定位文件</button></div></section>}
+          {displayedRecord && <section className="standalone-result stamp-inline-result"><header><h3>生成结果</h3><span>{displayedRecord.batchPrefix}</span></header>{displayedRecord.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="secondary" onClick={() => window.imageStudio.revealFile(displayedRecord.outputPath)}><FolderOpen size={15} />定位文件</button></div> : <div className="standalone-result-empty"><CircleAlert size={24} /><span>{displayedRecord.error}</span></div>}</section>}
         </div>
 
         <aside className="stamp-right-panel">
           <section><h3>工艺</h3><ChipGroup values={['印刷', '刺绣', '烫印']} value={craft} onChange={(value) => setCraft(value as typeof craft)} /><label>不透明度 <b>{opacity.toFixed(2)}</b><input type="range" min="0.2" max="1" step="0.05" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label><label>工艺强度 <b>{strength.toFixed(2)}</b><input type="range" min="0" max="1" step="0.05" value={strength} onChange={(event) => setStrength(Number(event.target.value))} /></label><label>阴影 <b>{shadow.toFixed(2)}</b><input type="range" min="0" max="1" step="0.05" value={shadow} onChange={(event) => setShadow(Number(event.target.value))} /></label><label>旋转角度 <b>{placement.rotation}°</b><input type="range" min="-180" max="180" step="1" value={placement.rotation} onChange={(event) => setPlacement({ ...placement, rotation: Number(event.target.value) })} /></label></section>
-          <section><h3>输出参数</h3><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>16:9</option></select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></section>
+          <section><h3>输出参数</h3><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></section>
           <section className="stamp-prompt-section"><header><h3>API 材质参考提示词</h3><button type="button" className="text-button" onClick={() => onDraft({ ...draft, stampPrompt: DEFAULT_STAMP_PROMPT })}><RefreshCw size={13} />恢复默认</button></header><textarea value={stampPrompt} onChange={(event) => onDraft({ ...draft, stampPrompt: event.target.value })} /><small>API 只处理产品材质与光影；客户 Logo 会在图片返回后按画布坐标由本地精准回贴。</small></section>
         </aside>
       </div>
@@ -1348,6 +1368,7 @@ function Garment3DPage({
   const [batchTag, setBatchTag] = useState('garment_3d');
   const [running, setRunning] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<GenerationRecord | null>(null);
+  const [previewRecord, setPreviewRecord] = useState<GenerationRecord | null>(null);
   const pick = async () => {
     const asset = await window.imageStudio.pickImage();
     if (asset) setGarment(asset);
@@ -1392,16 +1413,17 @@ function Garment3DPage({
       setRunning(false);
     }
   };
-  const displayedRecord = selectedRecord ?? snapshot.generations.find((record) => record.source === 'garment3d' && record.status === 'success') ?? null;
+  const displayedRecord = selectedRecord ?? snapshot.generations.find((record) => record.source === 'garment3d') ?? null;
 
   return (
     <div className="garment3d-page">
       <section className="tool-intro-card"><div><h2>3D服装白底图</h2><p>将服装参考图生成正面、居中的立体商品展示图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || !garment} onClick={generate}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `生成 ${quantity} 张`}</button></section>
       <div className="garment3d-workspace">
         <section className="garment3d-reference"><header><h3>服装参考图</h3><p>上传正面服装图，模型只使用这张图还原颜色、版型、纹理和细节。</p></header><button type="button" className={garment ? 'garment3d-upload filled' : 'garment3d-upload'} onClick={pick}>{garment ? <LocalImage asset={garment} alt="3D服装参考图" /> : <><Plus size={28} /><span>上传服装图</span></>}</button>{garment && <button type="button" className="text-button danger-text" onClick={() => setGarment(null)}><Trash2 size={14} />移除图片</button>}</section>
-        <section className="garment3d-settings"><header><h3>输出设置</h3></header><div className="garment3d-summary"><span>构图</span><strong>正面 · 居中 · 纯白背景</strong></div><div className="garment3d-summary"><span>分辨率</span><strong>{resolution} · {ratio}</strong></div><div className="garment3d-controls"><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option></select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></div><label className="garment3d-prompt"><strong>提示词</strong><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label></section>
+        <section className="garment3d-settings"><header><h3>输出设置</h3></header><div className="garment3d-summary"><span>构图</span><strong>正面 · 居中 · 纯白背景</strong></div><div className="garment3d-summary"><span>分辨率</span><strong>{resolution} · {ratio}</strong></div><div className="garment3d-controls"><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></div><label className="garment3d-prompt"><strong>提示词</strong><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label></section>
       </div>
-      <section className="standalone-result garment3d-result"><header><h3>生成结果</h3>{displayedRecord && <span>{displayedRecord.batchPrefix}</span>}</header>{displayedRecord ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="secondary" onClick={() => window.imageStudio.revealFile(displayedRecord.outputPath)}><FolderOpen size={15} />定位文件</button></div> : <div className="standalone-result-empty"><ImagePlus size={24} /><span>上传服装图并确认提示词后开始生成</span></div>}</section>
+      <section className="standalone-result garment3d-result"><header><h3>生成结果</h3>{displayedRecord && <span>{displayedRecord.batchPrefix}</span>}</header>{displayedRecord?.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord?.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={() => setPreviewRecord(displayedRecord)}><Maximize2 size={16} /></button></div> : <div className="standalone-result-empty"><ImagePlus size={24} /><span>上传服装图并确认提示词后开始生成</span></div>}</section>
+      {previewRecord && <ImagePreviewModal record={previewRecord} onClose={() => setPreviewRecord(null)} />}
     </div>
   );
 }
@@ -1465,6 +1487,11 @@ function DetailPage({
     const asset = await window.imageStudio.pickImage();
     if (!asset) return;
     updateTask(taskId, (task) => ({ ...task, name: task.name.startsWith('详情图任务 ') ? asset.name.replace(/\.[^.]+$/, '') : task.name, references: { ...task.references, garment: asset } }));
+  };
+  const addDetailAssets = async (taskId: string) => {
+    const assets = await window.imageStudio.pickImages();
+    if (assets.length === 0) return;
+    updateTask(taskId, (task) => ({ ...task, detailAssets: [...(task.detailAssets ?? []), ...assets].slice(0, 6) }));
   };
   const generate = async () => {
     const ready = tasks.filter((task) => task.references.garment);
@@ -1533,6 +1560,7 @@ function DetailPage({
                   <label>清晰度<select value={task.resolution} onChange={(event) => updateTask(task.id, (item) => ({ ...item, resolution: event.target.value, model: modelForResolution(item.model || draft.model, event.target.value) }))}><option>1K</option><option>2K</option></select></label>
                   <label>生成数量<input type="number" min="1" value={task.quantity} onChange={(event) => updateTask(task.id, (item) => ({ ...item, quantity: Math.max(1, Math.floor(Number(event.target.value) || 1)) }))} /></label>
                   <label>生图比例<select value={task.ratio} onChange={(event) => updateTask(task.id, (item) => ({ ...item, ratio: event.target.value }))}><option>1:1</option><option>3:4</option><option>9:16</option></select></label>
+                  <div className="detail-assets"><button type="button" className="secondary" onClick={() => addDetailAssets(task.id)}><Plus size={14} />添加细节图</button><small>{task.detailAssets?.length ?? 0}/6</small><div>{task.detailAssets?.map((asset) => <span key={asset.id}><LocalImage asset={asset} alt="细节参考图" /><button type="button" onClick={() => updateTask(task.id, (item) => ({ ...item, detailAssets: item.detailAssets?.filter((entry) => entry.id !== asset.id) }))}><X size={11} /></button></span>)}</div></div>
                 </section>
                 <section className="detail-prompt-column">
                   <header><h3>任务提示词</h3><div><button type="button" className={followsShared ? 'selected' : ''} onClick={() => updateTask(task.id, (item) => ({ ...item, useSharedPrompt: true, prompt: sharedPrompt }))}>跟随共享</button><button type="button" className={!followsShared ? 'selected' : ''} onClick={() => updateTask(task.id, (item) => ({ ...item, useSharedPrompt: false, prompt: item.prompt || sharedPrompt }))}>独立编辑</button></div></header>
@@ -2110,6 +2138,12 @@ export default function App() {
   }, [draft, loaded]);
 
   useEffect(() => {
+    if (!loaded || !snapshot.generations.some((record) => record.status === 'pending')) return;
+    const timer = window.setInterval(() => { void refresh(); }, 8_000);
+    return () => window.clearInterval(timer);
+  }, [loaded, refresh, snapshot.generations]);
+
+  useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(''), 4000);
     return () => window.clearTimeout(timer);
@@ -2205,8 +2239,9 @@ export default function App() {
     try {
       await window.imageStudio.startGeneration({ batchTag: draft.batchTag, model: draft.model, source: draft.mode === 'single' ? 'single' : draft.mode === 'template' ? 'template' : 'batch', tasks: requestTasks });
       await refresh();
-      setNotice('任务已提交，正在后台异步生成；可以继续提交下一批');
+      setNotice('任务已提交，当前批次完成后才可继续生成');
     } catch (error) {
+      setProgress(null);
       setNotice(error instanceof Error ? error.message : '生成失败');
     } finally {
       setGenerating(false);

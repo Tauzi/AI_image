@@ -36,6 +36,9 @@ declare global {
       openWorkspaceDirectory: () => Promise<string>;
       openOutputDirectory: () => Promise<string>;
       revealFile: (localPath: string) => Promise<void>;
+      copyImage: (localPath: string) => Promise<void>;
+      downloadImage: (localPath: string, suggestedName: string) => Promise<boolean>;
+      showImageContextMenu: (localPath: string, suggestedName: string) => Promise<void>;
       onGenerationProgress: (listener: (progress: GenerationProgress) => void) => () => void;
     };
   }

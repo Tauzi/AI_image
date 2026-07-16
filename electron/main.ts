@@ -1,8 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateImage } from './image-api';
+import { generateImage, resumeImageTask } from './image-api';
 import { LocalStore } from './store';
 import type {
   DraftState,
@@ -36,6 +36,9 @@ function createWindow(): void {
   });
   mainWindow.setMenuBarVisibility(false);
   mainWindow.once('ready-to-show', () => mainWindow?.show());
+  mainWindow.webContents.once('did-finish-load', () => {
+    setTimeout(() => { void resumePendingGenerations(); }, 500);
+  });
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void mainWindow.loadURL(devUrl);
   else void mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
@@ -141,15 +144,26 @@ function applyStampPostProcess(baseBytes: Buffer, logoPath: string, config: Stam
 }
 
 async function runBatch(request: StartGenerationRequest): Promise<{ batchId: string }> {
+  const batchPrefix = createBatchPrefix(request.source);
   const jobs = request.tasks.flatMap((task) =>
     Array.from({ length: Math.max(1, Math.floor(task.quantity)) }, (_, index) => ({ task, index })),
-  ).map((job, sequence) => ({ ...job, sequence }));
+  ).map((job, sequence) => {
+    const safeName = job.task.name.replace(/[<>:\"/\\|?*]/g, '-').slice(0, 40) || 'image';
+    return { ...job, sequence, recordId: randomUUID(), outputBaseName: `${batchPrefix}_${safeName}_${String(sequence + 1).padStart(3, '0')}_${job.index + 1}` };
+  });
   if (jobs.length === 0) throw new Error('请至少新增一个生成任务');
   if (jobs.some(({ task }) => !task.prompt.trim())) throw new Error('任务提示词不能为空');
-  const batchPrefix = createBatchPrefix(request.source);
   const batch = store.createBatch(`${batchPrefix}-${request.batchTag}`, jobs.length);
   const { settings, apiKey } = store.getSettingsForGeneration();
   let cursor = 0;
+  const createdAt = new Date().toISOString();
+  jobs.forEach((job) => store.addGeneration({
+    id: job.recordId, batchId: batch.id, taskId: job.task.id, taskName: job.task.name,
+    source: request.source, batchPrefix, status: 'pending', prompt: job.task.prompt,
+    model: job.task.model || request.model || settings.defaultModel, ratio: job.task.ratio,
+    resolution: job.task.resolution, outputPath: '', error: '', durationMs: 0, attempts: 0, createdAt,
+    outputBaseName: job.outputBaseName, stampPostProcess: job.task.stampPostProcess,
+  }));
 
   const worker = async (): Promise<void> => {
     while (cursor < jobs.length) {
@@ -158,7 +172,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
       const started = Date.now();
       let record: GenerationRecord;
       try {
-        const referenceIds = Array.from(new Set(Object.values(current.task.references)
+        const referenceIds = Array.from(new Set([...Object.values(current.task.references), ...(current.task.detailAssets ?? [])]
           .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset))
           .map((asset) => asset.id)));
         const references = referenceIds.map((id) => store.getAsset(id)).filter((asset): asset is NonNullable<typeof asset> => Boolean(asset));
@@ -170,6 +184,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
           ratio: current.task.ratio,
           resolution: current.task.resolution,
           references,
+          onTaskAccepted: (remoteKind, remoteTaskId) => store.updateGeneration(current.recordId, { remoteKind, remoteTaskId }),
         });
         let outputBytes = generated.bytes;
         let outputExtension = generated.extension;
@@ -179,14 +194,13 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
           outputBytes = applyStampPostProcess(generated.bytes, logoAsset.localPath, current.task.stampPostProcess);
           outputExtension = '.png';
         }
-        const safeName = current.task.name.replace(/[<>:\"/\\|?*]/g, '-').slice(0, 40) || 'image';
         const outputPath = path.join(
           store.outputDirectory,
-          `${batchPrefix}_${safeName}_${String(current.sequence + 1).padStart(3, '0')}_${current.index + 1}${outputExtension}`,
+          `${current.outputBaseName}${outputExtension}`,
         );
         fs.writeFileSync(outputPath, outputBytes);
         record = {
-          id: randomUUID(),
+          id: current.recordId,
           batchId: batch.id,
           taskId: current.task.id,
           taskName: current.task.name,
@@ -205,7 +219,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
         };
       } catch (error) {
         record = {
-          id: randomUUID(),
+          id: current.recordId,
           batchId: batch.id,
           taskId: current.task.id,
           taskName: current.task.name,
@@ -223,7 +237,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
           createdAt: new Date().toISOString(),
         };
       }
-      store.addGeneration(record);
+      store.completeGeneration(record);
       const currentBatch = store.getBatch(batch.id);
       if (currentBatch) {
         mainWindow?.webContents.send('generation:progress', {
@@ -244,12 +258,39 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
   return { batchId: batch.id };
 }
 
+async function resumePendingGenerations(): Promise<void> {
+  const pending = store.pendingGenerations();
+  if (pending.length === 0) return;
+  const { apiKey } = store.getSettingsForGeneration();
+  await Promise.all(pending.map(async (record) => {
+    const started = Date.now();
+    try {
+      if (!record.remoteTaskId || !record.remoteKind) throw new Error('旧任务未保存远程 taskId，无法自动恢复，请重新提交');
+      const generated = await resumeImageTask(record.remoteKind, record.remoteTaskId, apiKey);
+      let outputBytes = generated.bytes;
+      let outputExtension = generated.extension;
+      if (record.stampPostProcess) {
+        const logoAsset = store.getAsset(record.stampPostProcess.logoAssetId);
+        if (!logoAsset) throw new Error('贴标 Logo 素材不存在，无法恢复后处理');
+        outputBytes = applyStampPostProcess(generated.bytes, logoAsset.localPath, record.stampPostProcess);
+        outputExtension = '.png';
+      }
+      const outputPath = path.join(store.outputDirectory, `${record.outputBaseName || record.id}${outputExtension}`);
+      fs.writeFileSync(outputPath, outputBytes);
+      store.completeGeneration({ ...record, status: 'success', outputPath, error: '', durationMs: Date.now() - started, attempts: generated.attempts });
+    } catch (error) {
+      store.completeGeneration({ ...record, status: 'error', error: errorMessage(error), durationMs: Date.now() - started });
+    }
+    const batch = store.getBatch(record.batchId);
+    if (batch) mainWindow?.webContents.send('generation:progress', { batchId: batch.id, completed: batch.completed, total: batch.total, succeeded: batch.succeeded, failed: batch.failed });
+  }));
+}
+
 app.whenReady().then(() => {
   app.setName('苜芬绘图AI');
   app.setAppUserModelId('com.mufen.imageai');
   Menu.setApplicationMenu(null);
   store = new LocalStore();
-
   ipcMain.handle('app:get-snapshot', () => store.snapshot());
   ipcMain.handle('settings:save', (_event, settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }) =>
     store.updateSettings(settings),
@@ -300,6 +341,26 @@ app.whenReady().then(() => {
   ipcMain.handle('workspace:open-directory', () => shell.openPath(store.snapshot().workspaceDirectory));
   ipcMain.handle('output:open-directory', () => shell.openPath(store.outputDirectory));
   ipcMain.handle('output:reveal-file', (_event, localPath: string) => shell.showItemInFolder(localPath));
+  ipcMain.handle('image:copy', (_event, localPath: string) => {
+    const image = nativeImage.createFromPath(localPath);
+    if (image.isEmpty()) throw new Error('无法读取图片');
+    clipboard.writeImage(image);
+  });
+  ipcMain.handle('image:download', async (_event, localPath: string, suggestedName: string) => {
+    const result = await dialog.showSaveDialog(mainWindow!, { defaultPath: suggestedName || path.basename(localPath) });
+    if (result.canceled || !result.filePath) return false;
+    fs.copyFileSync(localPath, result.filePath);
+    return true;
+  });
+  ipcMain.handle('image:context-menu', (event, localPath: string, suggestedName: string) => {
+    Menu.buildFromTemplate([
+      { label: '复制图片', click: () => clipboard.writeImage(nativeImage.createFromPath(localPath)) },
+      { label: '下载图片…', click: async () => {
+        const result = await dialog.showSaveDialog(mainWindow!, { defaultPath: suggestedName || path.basename(localPath) });
+        if (!result.canceled && result.filePath) fs.copyFileSync(localPath, result.filePath);
+      } },
+    ]).popup({ window: BrowserWindow.fromWebContents(event.sender) ?? mainWindow ?? undefined });
+  });
 
   createWindow();
   app.on('activate', () => {

@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('imageStudio', {
   openWorkspaceDirectory: () => ipcRenderer.invoke('workspace:open-directory'),
   openOutputDirectory: () => ipcRenderer.invoke('output:open-directory'),
   revealFile: (localPath: string) => ipcRenderer.invoke('output:reveal-file', localPath),
+  copyImage: (localPath: string) => ipcRenderer.invoke('image:copy', localPath),
+  downloadImage: (localPath: string, suggestedName: string) => ipcRenderer.invoke('image:download', localPath, suggestedName),
+  showImageContextMenu: (localPath: string, suggestedName: string) => ipcRenderer.invoke('image:context-menu', localPath, suggestedName),
   onGenerationProgress: (listener: (progress: GenerationProgress) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: GenerationProgress) => listener(progress);
     ipcRenderer.on('generation:progress', handler);

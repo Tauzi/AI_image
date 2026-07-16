@@ -194,6 +194,7 @@ export class LocalStore {
     fs.mkdirSync(this.assetDirectory, { recursive: true });
     fs.mkdirSync(this.outputDirectory, { recursive: true });
     this.state = this.load();
+    this.persist();
   }
 
   private load(): StoredState {
@@ -214,12 +215,19 @@ export class LocalStore {
         queueShared: { ...fallback.draft.queueShared, ...parsed.draft?.queueShared },
         queueOutput: { ...fallback.draft.queueOutput, ...parsed.draft?.queueOutput },
       };
-      const generations = Array.isArray(parsed.generations) ? parsed.generations.map((record) => ({
-        ...record,
-        source: record.source || (record.taskName.startsWith('生图台') ? 'workbench' : 'batch'),
-        batchPrefix: record.batchPrefix || `LEGACY-${record.batchId.slice(0, 8)}`,
-        attempts: record.attempts || 1,
-      })) : [];
+      const generations = Array.isArray(parsed.generations) ? parsed.generations.map((record) => {
+        const normalized = {
+          ...record,
+          source: record.source || (record.taskName.startsWith('生图台') ? 'workbench' : 'batch'),
+          batchPrefix: record.batchPrefix || `LEGACY-${record.batchId.slice(0, 8)}`,
+          attempts: record.attempts || 1,
+        };
+        if (normalized.status !== 'pending') {
+          delete normalized.remoteTaskId;
+          delete normalized.remoteKind;
+        }
+        return normalized;
+      }) : [];
       if (!draft.model || ['gpt-image-1', 'dall-e-3'].includes(draft.model)) draft.model = DEFAULT_MODEL;
       if (!['single', 'batch', 'template'].includes(draft.mode)) draft.mode = 'batch';
       draft.queueOutput.frontQuantity = Number.isFinite(draft.queueOutput.frontQuantity) ? Math.max(0, Math.floor(draft.queueOutput.frontQuantity)) : 10;
@@ -256,7 +264,7 @@ export class LocalStore {
   }
 
   private persist(): void {
-    fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 2), 'utf8');
+    fs.writeFileSync(this.statePath, JSON.stringify(this.state, (key, value) => key === 'preview' ? undefined : value, 2), 'utf8');
   }
 
   snapshot(): AppSnapshot {
@@ -404,6 +412,18 @@ export class LocalStore {
 
   addGeneration(record: GenerationRecord): void {
     this.state.generations.unshift(record);
+    if (record.status === 'pending') {
+      this.persist();
+      return;
+    }
+    this.completeGeneration(record);
+  }
+
+  completeGeneration(record: GenerationRecord): void {
+    const completedRecord = { ...record, remoteTaskId: undefined, remoteKind: undefined };
+    const existing = this.state.generations.findIndex((item) => item.id === record.id);
+    if (existing >= 0) this.state.generations[existing] = completedRecord;
+    else this.state.generations.unshift(completedRecord);
     const batch = this.state.batches.find((item) => item.id === record.batchId);
     if (batch) {
       batch.completed += 1;
@@ -415,6 +435,17 @@ export class LocalStore {
       }
     }
     this.persist();
+  }
+
+  updateGeneration(recordId: string, update: Partial<GenerationRecord>): void {
+    const record = this.state.generations.find((item) => item.id === recordId);
+    if (!record) return;
+    Object.assign(record, update);
+    this.persist();
+  }
+
+  pendingGenerations(): GenerationRecord[] {
+    return this.state.generations.filter((record) => record.status === 'pending').map((record) => ({ ...record }));
   }
 
   getBatch(batchId: string): BatchRecord | undefined {
