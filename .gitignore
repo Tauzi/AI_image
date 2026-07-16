@@ -1,0 +1,23 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.npm-cache/
+.agents/
+*.log
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+config.json
+settings.json
+credentials.json
+secrets.json
+*.key
+*.pem
+*.pfx
+*.p12

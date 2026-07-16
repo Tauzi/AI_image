@@ -1,0 +1,64 @@
+{
+  "name": "pixel-forge-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "苜芬绘图AI - 本地优先的批量生图工作台",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "npm run build:electron && concurrently --raw -k \"node scripts/dev-server.mjs\" \"tsc -p tsconfig.electron.json --watch --preserveWatchOutput\" \"wait-on http-get://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node scripts/run-electron.mjs\"",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && npm run build:electron && vite build",
+    "package:win": "npm run build && electron-builder --win nsis",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "1.24.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "concurrently": "10.0.3",
+    "cross-env": "10.1.0",
+    "electron": "37.10.3",
+    "electron-builder": "26.15.3",
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "wait-on": "9.0.10"
+  },
+  "build": {
+    "appId": "com.mufen.imageai",
+    "productName": "苜芬绘图AI",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "Mufen-Image-AI-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
