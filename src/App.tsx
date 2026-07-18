@@ -4,6 +4,8 @@ import {
   Archive,
   Boxes,
   Check,
+  ChevronLeft,
+  ChevronRight,
   ChevronDown,
   CircleAlert,
   Copy,
@@ -90,7 +92,8 @@ const PAGE_META: Record<PageId, { title: string; subtitle: string }> = {
   assets: { title: '资产库', subtitle: '集中浏览全部生成图片，并按来源、模型与日期快速筛选' },
   stamp: { title: '精准产品贴标', subtitle: '自由定位 Logo，自动去除底色并融合到服装或包包表面' },
   garment3d: { title: '3D服装白底图', subtitle: '将服装参考图生成居中的立体白底产品展示图' },
-  detail: { title: '电商详情页重排', subtitle: '批量上传详情图，以共享或独立提示词生成全新排版' },
+  'detail-generate': { title: '详情页生成', subtitle: '上传产品图并生成完整的电商详情页图片组' },
+  detail: { title: '详情页重排', subtitle: '批量上传详情图，以共享或独立提示词生成全新排版' },
   tags: { title: '标签管理', subtitle: '管理可选择并替换到生图提示词中的标签' },
   batches: { title: '批次记录', subtitle: '追踪每次批量任务的完成情况' },
   settings: { title: '服务设置', subtitle: '配置卡密、调用模式与本地工作目录' },
@@ -100,6 +103,25 @@ function normalizedGenerationRatios(values: string[] | undefined, fallback: stri
   const selected = (values ?? []).filter((ratio) => SUPPORTED_ASPECT_RATIOS.includes(ratio));
   if (selected.length > 0) return SUPPORTED_ASPECT_RATIOS.filter((ratio) => selected.includes(ratio));
   return [SUPPORTED_ASPECT_RATIOS.includes(fallback) ? fallback : SUPPORTED_ASPECT_RATIOS[0]];
+}
+
+function queueRatioQuantity(output: DraftState['queueOutput'], direction: 'front' | 'side', ratio: string): number {
+  const quantities = direction === 'front' ? output.frontRatioQuantities : output.sideRatioQuantities;
+  const fallback = direction === 'front' ? output.frontQuantity : output.sideQuantity;
+  const value = quantities?.[ratio];
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value!)) : Math.max(0, Math.floor(fallback));
+}
+
+function queueDirectionTotal(output: DraftState['queueOutput'], direction: 'front' | 'side'): number {
+  const ratios = direction === 'front'
+    ? normalizedGenerationRatios(output.frontRatios, output.frontRatio)
+    : normalizedGenerationRatios(output.sideRatios, output.sideRatio);
+  return ratios.reduce((sum, ratio) => sum + queueRatioQuantity(output, direction, ratio), 0);
+}
+
+function taskRatioQuantity(task: GenerationTask, ratio: string): number {
+  const value = task.ratioQuantities?.[ratio];
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value!)) : Math.max(1, Math.floor(task.quantity || 1));
 }
 
 function modelForResolution(currentModel: string, resolution: string): string {
@@ -207,13 +229,19 @@ function LocalImage({ asset, path, alt }: { asset?: AssetRecord; path?: string; 
   const localPath = path ?? asset?.localPath;
   useEffect(() => {
     let active = true;
-    if (!source && localPath) {
-      window.imageStudio.readImage(localPath).then((value) => active && setSource(value)).catch(() => undefined);
-    }
+    const preview = asset?.preview ?? '';
+    if (preview) setSource(preview);
+    else if (localPath) {
+      setSource('');
+      window.imageStudio.readImage(localPath).then((value) => active && setSource(value)).catch(() => {
+        if (active) setSource('');
+        void window.imageStudio.reportMissingImage(localPath);
+      });
+    } else setSource('');
     return () => {
       active = false;
     };
-  }, [localPath, source]);
+  }, [localPath, asset?.preview]);
   if (!source) return <div className="image-loading"><LoaderCircle size={18} className="spin" /></div>;
   return <img src={source} alt={alt} onContextMenu={(event) => {
     if (!localPath) return;
@@ -222,14 +250,16 @@ function LocalImage({ asset, path, alt }: { asset?: AssetRecord; path?: string; 
   }} />;
 }
 
-function ImagePreviewModal({ record, onClose }: { record: GenerationRecord; onClose: () => void }) {
+function ImagePreviewModal({ record, onClose, onPrevious, onNext }: { record: GenerationRecord; onClose: () => void; onPrevious?: () => void; onNext?: () => void }) {
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
+      if (event.key === 'ArrowLeft') onPrevious?.();
+      if (event.key === 'ArrowRight') onNext?.();
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose]);
+  }, [onClose, onPrevious, onNext]);
 
   return (
     <div className="image-preview-backdrop" role="dialog" aria-modal="true" aria-label={`${record.taskName} 图片预览`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -238,7 +268,7 @@ function ImagePreviewModal({ record, onClose }: { record: GenerationRecord; onCl
           <div><strong>{record.taskName}</strong><span>{record.batchPrefix} · {record.model} · {record.ratio} · {record.resolution}</span></div>
           <button type="button" className="preview-close-button" onClick={onClose} title="关闭预览"><X size={19} /></button>
         </header>
-        <div className="image-preview-stage"><LocalImage path={record.outputPath} alt={record.taskName} /></div>
+        <div className="image-preview-stage"><LocalImage path={record.outputPath} alt={record.taskName} />{onPrevious && <button type="button" className="preview-navigation previous" onClick={onPrevious} title="上一张（←）"><ChevronLeft size={26} /></button>}{onNext && <button type="button" className="preview-navigation next" onClick={onNext} title="下一张（→）"><ChevronRight size={26} /></button>}</div>
         <footer><span>{formatDate(record.createdAt)}</span><button type="button" className="secondary" onClick={() => window.imageStudio.revealFile(record.outputPath)}><FolderOpen size={15} />定位文件</button></footer>
       </div>
     </div>
@@ -253,7 +283,8 @@ function Sidebar({ page, onChange }: { page: PageId; onChange: (page: PageId) =>
     { id: 'assets', label: '资产库', icon: Archive },
     { id: 'stamp', label: '贴标', icon: Tag },
     { id: 'garment3d', label: '3D白底', icon: Boxes },
-    { id: 'detail', label: '详情页', icon: Image },
+    { id: 'detail-generate', label: '详情页生成', icon: ImagePlus },
+    { id: 'detail', label: '详情页重排', icon: Image },
     { id: 'tags', label: '标签', icon: Tag },
     { id: 'batches', label: '任务', icon: Boxes },
     { id: 'settings', label: '设置', icon: Settings },
@@ -375,6 +406,7 @@ function TaskCard({
   onDelete,
   onAssetImported,
   tagGroups,
+  outputRatios,
 }: {
   task: GenerationTask;
   index: number;
@@ -384,6 +416,7 @@ function TaskCard({
   onDelete: () => void;
   onAssetImported: (asset: AssetRecord) => void;
   tagGroups: TagGroup[];
+  outputRatios: string[];
 }) {
   const activeGroup = tagGroups.find((group) => group.id === task.tagGroupId) ?? tagGroups[0];
   const activeSubcategory = activeGroup?.subcategories.find((subcategory) => subcategory.id === task.tagSubcategoryId) ?? activeGroup?.subcategories[0];
@@ -454,8 +487,8 @@ function TaskCard({
           </select>
           <label className="field-label">方向</label>
           <ChipGroup values={['正面', '侧面', '背面']} value={task.direction} onChange={(value) => { const nextTask = { ...task, direction: value }; onUpdate({ ...nextTask, prompt: composePrompt(nextTask, activeGroup, activeSubcategory) }); }} />
-          <div className="compact-fields single">
-            <label>生成数量<input type="number" min="1" value={task.quantity} onChange={(event) => set('quantity', Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label>
+          <div className="compact-fields task-ratio-quantities">
+            {outputRatios.map((ratio) => <label key={ratio}>{ratio} 数量<input type="number" min="0" value={taskRatioQuantity(task, ratio)} onChange={(event) => set('ratioQuantities', { ...task.ratioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) })} /></label>)}
           </div>
         </section>
         <section className="dimension-panel" aria-label="提示词维度">
@@ -533,9 +566,7 @@ function TemplateQueuePage({
   };
   const total = readyTasks.reduce((sum, task) => {
     const output = outputForTask(task);
-    const frontRatios = normalizedGenerationRatios(output.frontRatios, output.frontRatio);
-    const sideRatios = normalizedGenerationRatios(output.sideRatios, output.sideRatio);
-    return sum + output.frontQuantity * frontRatios.length + output.sideQuantity * sideRatios.length;
+    return sum + queueDirectionTotal(output, 'front') + queueDirectionTotal(output, 'side');
   }, 0);
   const missingFaceCount = readyTasks.filter((task) => !frontForTask(task)).length;
   const pendingCount = snapshot.generations.filter((record) => record.source === 'template' && record.status === 'pending').length;
@@ -707,8 +738,8 @@ function TemplateQueuePage({
                   <div className="garment-config-summary">
                     <span className={itemHasFace ? 'ready' : 'missing'}>{itemHasFace ? '人脸已就绪' : '缺少正面人脸'}</span>
                     <span>{itemPreset ? itemPreset.name : '共享配置'}</span>
-                    <span>计划 {itemOutput.frontQuantity * normalizedGenerationRatios(itemOutput.frontRatios, itemOutput.frontRatio).length + itemOutput.sideQuantity * normalizedGenerationRatios(itemOutput.sideRatios, itemOutput.sideRatio).length} 张</span>
-                    <span>正 {itemOutput.frontQuantity} / 侧 {itemOutput.sideQuantity}</span>
+                    <span>计划 {queueDirectionTotal(itemOutput, 'front') + queueDirectionTotal(itemOutput, 'side')} 张</span>
+                    <span>正 {queueDirectionTotal(itemOutput, 'front')} / 侧 {queueDirectionTotal(itemOutput, 'side')}</span>
                     <span>{itemPreset?.resolution ?? task.resolution}</span>
                   </div>
                 </div>
@@ -723,10 +754,9 @@ function TemplateQueuePage({
         <section><h3>从预设加载</h3><div className="queue-preset-row"><select value={presetId} onChange={(event) => setPresetId(event.target.value)}><option value="">选择预设</option>{snapshot.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select><button type="button" className="secondary" disabled={!presetId} onClick={loadPreset}>加载</button></div><small>预设可在左侧“模板”页面新增和编辑。</small></section>
         <section><h3>大分类</h3><div className="queue-setting-chips wrap">{snapshot.tagGroups.map((group) => <button type="button" key={group.id} className={activeGroup?.id === group.id ? 'selected' : ''} onClick={() => changeGroup(group)}>{group.name}</button>)}</div></section>
         <section><h3>小分类</h3><div className="queue-setting-chips wrap">{activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={activeSubcategory?.id === subcategory.id ? 'selected' : ''} onClick={() => changeSubcategory(subcategory)}>{subcategory.name}</button>)}</div></section>
-        <section><h3>出图数量</h3><div className="queue-direction-grid"><label>正面数量<input type="number" min="0" value={draft.queueOutput.frontQuantity} onChange={(event) => setQueueOutput('frontQuantity', Math.max(0, Math.floor(Number(event.target.value) || 0)))} /></label><label>侧面数量<input type="number" min="0" value={draft.queueOutput.sideQuantity} onChange={(event) => setQueueOutput('sideQuantity', Math.max(0, Math.floor(Number(event.target.value) || 0)))} /></label></div></section>
         <section><h3>出图质量</h3><ChipGroup values={['1K', '2K']} value={baseTask.resolution} onChange={(value) => setOutputForAll('resolution', value)} /></section>
-        <section><h3>正面比例（可多选）</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.frontRatios, draft.queueOutput.frontRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatios: values, frontRatio: values[0] } })} /></section>
-        <section><h3>侧面比例（可多选）</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.sideRatios, draft.queueOutput.sideRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatios: values, sideRatio: values[0] } })} /></section>
+        <section><h3>正面比例与数量</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.frontRatios, draft.queueOutput.frontRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatios: values, frontRatio: values[0] } })} /><div className="ratio-quantity-grid">{normalizedGenerationRatios(draft.queueOutput.frontRatios, draft.queueOutput.frontRatio).map((ratio) => <label key={ratio}><span>{ratio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'front', ratio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatioQuantities: { ...draft.queueOutput.frontRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label>)}</div></section>
+        <section><h3>侧面比例与数量</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.sideRatios, draft.queueOutput.sideRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatios: values, sideRatio: values[0] } })} /><div className="ratio-quantity-grid">{normalizedGenerationRatios(draft.queueOutput.sideRatios, draft.queueOutput.sideRatio).map((ratio) => <label key={ratio}><span>{ratio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'side', ratio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatioQuantities: { ...draft.queueOutput.sideRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label>)}</div></section>
         <section><h3>生成模型</h3><div className="queue-model-options"><button type="button" className="selected">{draft.model}</button></div><input value={draft.model} onChange={(event) => onDraft({ ...draft, model: event.target.value })} /></section>
         <section><h3>批次标签</h3><input value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></section>
         <button type="button" className="primary queue-start-button" disabled={generationBusy || readyTasks.length === 0 || missingFaceCount > 0 || total === 0} onClick={onGenerate}>{generationBusy ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{generating ? '提交中' : generationBusy ? `模板队列生成中（剩余 ${pendingCount} 张）` : `开始生成 ${total} 张`}</button>
@@ -758,7 +788,7 @@ function StudioPage({
   }
   const visibleTasks = draft.mode === 'single' ? draft.tasks.slice(0, 1) : draft.tasks;
   const outputRatios = normalizedGenerationRatios(draft.outputRatios, visibleTasks[0]?.ratio ?? '3:4');
-  const total = visibleTasks.reduce((sum, task) => sum + task.quantity, 0) * outputRatios.length;
+  const total = visibleTasks.reduce((sum, task) => sum + outputRatios.reduce((ratioSum, ratio) => ratioSum + taskRatioQuantity(task, ratio), 0), 0);
   const currentSource = draft.mode === 'single' ? 'single' : 'batch';
   const pendingCount = snapshot.generations.filter((record) => record.source === currentSource && record.status === 'pending').length;
   const generationBusy = generating || pendingCount > 0;
@@ -794,6 +824,7 @@ function StudioPage({
                 onDelete={() => removeTask(task.id)}
                 onAssetImported={onAssets}
                 tagGroups={snapshot.tagGroups}
+                outputRatios={outputRatios}
               />
               <TaskResults records={snapshot.generations.filter((record) => record.taskId === task.id)} />
             </div>
@@ -834,26 +865,30 @@ function buildWorkbenchPrompt(group: TagGroup | undefined, subcategory: TagSubca
 
 function WorkbenchPage({
   snapshot,
+  draft,
+  onDraft,
   onRefresh,
   onOpenSettings,
   onNotice,
 }: {
   snapshot: AppSnapshot;
+  draft: DraftState;
+  onDraft: (draft: DraftState) => void;
   onRefresh: () => Promise<AppSnapshot>;
   onOpenSettings: () => void;
   onNotice: (message: string) => void;
 }) {
   const groups = snapshot.tagGroups;
-  const [selectedGroupId, setSelectedGroupId] = useState(groups[0]?.id ?? '');
+  const [selectedGroupId, setSelectedGroupId] = useState(draft.workbenchGroupId || groups[0]?.id || '');
   const activeGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0];
-  const [selectedSubcategoryId, setSelectedSubcategoryId] = useState(groups[0]?.subcategories[0]?.id ?? '');
+  const [selectedSubcategoryId, setSelectedSubcategoryId] = useState(draft.workbenchSubcategoryId || activeGroup?.subcategories[0]?.id || '');
   const activeSubcategory = activeGroup?.subcategories.find((subcategory) => subcategory.id === selectedSubcategoryId) ?? activeGroup?.subcategories[0];
   const categories = activeSubcategory?.dimensions ?? [];
-  const [selections, setSelections] = useState<Record<string, string>>(() =>
-    Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => [category.name, category.tags[0].name])),
-  );
-  const [prompt, setPrompt] = useState(() => buildWorkbenchPrompt(activeGroup, activeSubcategory, selections));
-  const [reference, setReference] = useState<AssetRecord | null>(null);
+  const [selections, setSelections] = useState<Record<string, string>>(() => Object.keys(draft.workbenchSelections ?? {}).length > 0
+    ? { ...draft.workbenchSelections }
+    : Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => [category.name, category.tags[0].name])));
+  const [prompt, setPrompt] = useState(() => draft.workbenchFreeMode ? (draft.workbenchPrompt ?? '') : (draft.workbenchPrompt || buildWorkbenchPrompt(activeGroup, activeSubcategory, selections)));
+  const [references, setReferences] = useState<Array<{ asset: AssetRecord; x: number; y: number; linked: boolean }>>([]);
   const [model, setModel] = useState(snapshot.settings.defaultModel);
   const [ratio, setRatio] = useState('1:1');
   const [resolution, setResolution] = useState('1K');
@@ -863,38 +898,66 @@ function WorkbenchPage({
   const [showResult, setShowResult] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [previewRecord, setPreviewRecord] = useState<GenerationRecord | null>(null);
-  const [freeMode, setFreeMode] = useState(false);
+  const [freeMode, setFreeMode] = useState(Boolean(draft.workbenchFreeMode));
+  const referenceDrag = useRef<null | { id: string; startX: number; startY: number; x: number; y: number }>(null);
 
   const workbenchRecords = snapshot.generations.filter((record) => record.source === 'workbench').slice(0, 12);
   const iterationRecords = workbenchRecords.filter((record) => record.status === 'success');
   const pendingRecord = workbenchRecords.find((record) => record.status === 'pending');
   const selectedRecord = showResult ? iterationRecords.find((record) => record.id === selectedRecordId) ?? iterationRecords[0] : undefined;
+  const updateWorkbenchDraft = (update: Partial<DraftState>) => onDraft({ ...draft, ...update });
 
   useEffect(() => {
-    setSelections((current) => {
-      const next = Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => {
-        const existing = category.tags.some((tag) => tag.name === current[category.name]) ? current[category.name] : category.tags[0].name;
-        return [category.name, existing];
-      }));
-      setPrompt(buildWorkbenchPrompt(activeGroup, activeSubcategory, next));
-      return next;
-    });
-  }, [activeSubcategory?.id, snapshot.tagGroups]);
+    if (freeMode) return;
+    const next = Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => {
+      const existing = category.tags.some((tag) => tag.name === selections[category.name]) ? selections[category.name] : category.tags[0].name;
+      return [category.name, existing];
+    }));
+    const nextPrompt = buildWorkbenchPrompt(activeGroup, activeSubcategory, next);
+    setSelections(next);
+    setPrompt(nextPrompt);
+    updateWorkbenchDraft({ workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: next, workbenchPrompt: nextPrompt });
+  }, [activeSubcategory?.id, freeMode]);
 
   useEffect(() => window.imageStudio.onGenerationProgress((progress) => {
     if (running) setLocalProgress(progress);
   }), [running]);
 
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const drag = referenceDrag.current;
+      if (!drag) return;
+      setReferences((current) => current.map((item) => item.asset.id === drag.id ? {
+        ...item,
+        x: Math.max(0, Math.min(980, drag.x + event.clientX - drag.startX)),
+        y: Math.max(0, Math.min(760, drag.y + event.clientY - drag.startY)),
+      } : item));
+    };
+    const stop = () => { referenceDrag.current = null; };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); };
+  }, []);
+
   const selectTag = (category: TagCategory, tagName: string) => {
     if (freeMode) return;
     const next = { ...selections, [category.name]: tagName };
+    const nextPrompt = buildWorkbenchPrompt(activeGroup, activeSubcategory, next);
     setSelections(next);
-    setPrompt(buildWorkbenchPrompt(activeGroup, activeSubcategory, next));
+    setPrompt(nextPrompt);
+    updateWorkbenchDraft({ workbenchSelections: next, workbenchPrompt: nextPrompt });
   };
 
-  const pickReference = async () => {
-    const asset = await window.imageStudio.pickImage();
-    if (asset) setReference(asset);
+  const pickReferences = async () => {
+    const assets = await window.imageStudio.pickImages();
+    if (assets.length === 0) return;
+    setReferences((current) => {
+      const existing = new Set(current.map((item) => item.asset.id));
+      const additions = assets.filter((asset) => !existing.has(asset.id)).map((asset, index) => ({
+        asset, x: 22 + ((current.length + index) % 4) * 148, y: 550 + Math.floor((current.length + index) / 4) * 142, linked: true,
+      }));
+      return [...current, ...additions].slice(0, 9);
+    });
   };
 
   const generate = async (referenceOverride?: AssetRecord) => {
@@ -907,13 +970,17 @@ function WorkbenchPage({
       onOpenSettings();
       return;
     }
-    const activeReference = referenceOverride ?? reference;
+    await window.imageStudio.saveDraft({ ...draft, workbenchFreeMode: freeMode, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: selections, workbenchPrompt: prompt });
+    const activeReferences = [...references.filter((item) => item.linked).map((item) => item.asset)];
+    if (referenceOverride && !activeReferences.some((asset) => asset.id === referenceOverride.id)) activeReferences.push(referenceOverride);
+    const slots = [activeReferences[0] ?? null, activeReferences[1] ?? null, activeReferences[2] ?? null];
     const task: GenerationTask = {
       id: newId(),
       name: `生图台迭代 ${iterationRecords.length + 1}`,
       tagGroupId: activeGroup?.id ?? '',
       tagSubcategoryId: activeSubcategory?.id ?? '',
-      references: { garment: activeReference ?? null, side: null, face: null },
+      references: { garment: slots[0], side: slots[1], face: slots[2] },
+      detailAssets: activeReferences.slice(3),
       dimensions: selections,
       direction: '正面',
       category: freeMode ? '自由生图' : activeSubcategory?.name ?? activeGroup?.name ?? '自由创作',
@@ -945,8 +1012,8 @@ function WorkbenchPage({
     if (!selectedRecord) return;
     try {
       const asset = await window.imageStudio.useGenerationAsReference(selectedRecord.outputPath);
-      setReference(asset);
-      await generate(asset);
+       setReferences((current) => [...current.filter((item) => item.asset.id !== asset.id), { asset, x: 22, y: 550, linked: true }].slice(-9));
+       await generate(asset);
     } catch (error) {
       onNotice(error instanceof Error ? error.message : '无法读取迭代参考图');
       setRunning(false);
@@ -960,31 +1027,35 @@ function WorkbenchPage({
           <div><h2>创作配方</h2><p>{Object.keys(selections).length} 个维度已选择</p></div>
           <span>自动替换</span>
         </div>
-        <button type="button" className={freeMode ? 'secondary wide selected' : 'secondary wide'} onClick={() => {
-          setFreeMode((value) => !value);
-          setSelections({});
-          if (!freeMode) setPrompt('');
-          else setPrompt(buildWorkbenchPrompt(activeGroup, activeSubcategory, {}));
-        }}><WandSparkles size={15} />自由生图固定模式</button>
-        <div className="recipe-groups">
-          {groups.map((group) => <button type="button" key={group.id} className={activeGroup?.id === group.id ? 'selected' : ''} onClick={() => { setSelectedGroupId(group.id); setSelectedSubcategoryId(group.subcategories[0]?.id ?? ''); }}>{group.name}</button>)}
-        </div>
-        <div className="recipe-subcategories">
-          {activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={activeSubcategory?.id === subcategory.id ? 'selected' : ''} onClick={() => setSelectedSubcategoryId(subcategory.id)}>{subcategory.name}</button>)}
-        </div>
-        <div className={freeMode ? 'recipe-scroll disabled-tags' : 'recipe-scroll'}>
-          {categories.map((category) => (
-            <section className="recipe-category" key={category.id}>
-              <header><strong>{category.name}</strong><span>{selections[category.name] || '未选择'}</span></header>
-              <div className="recipe-tags">
-                {category.tags.map((tag) => (
-                  <button type="button" key={tag.id} className={selections[category.name] === tag.name ? 'selected' : ''} onClick={() => selectTag(category, tag.name)} title={tag.prompt}>
-                    {tag.name}
-                  </button>
-                ))}
-              </div>
-            </section>
-          ))}
+        <div className="recipe-options-scroll">
+          <button type="button" className={freeMode ? 'secondary wide selected recipe-free-mode' : 'secondary wide recipe-free-mode'} onClick={() => {
+            const nextFreeMode = !freeMode;
+            const nextPrompt = nextFreeMode ? '' : buildWorkbenchPrompt(activeGroup, activeSubcategory, {});
+            setFreeMode(nextFreeMode);
+            setSelections({});
+            setPrompt(nextPrompt);
+            updateWorkbenchDraft({ workbenchFreeMode: nextFreeMode, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: {}, workbenchPrompt: nextPrompt });
+          }}><WandSparkles size={15} />自由生图固定模式</button>
+          <div className={freeMode ? 'recipe-groups disabled-selector' : 'recipe-groups'}>
+            {groups.map((group) => <button type="button" key={group.id} className={!freeMode && activeGroup?.id === group.id ? 'selected' : ''} disabled={freeMode} onClick={() => { const subcategoryId = group.subcategories[0]?.id ?? ''; setSelectedGroupId(group.id); setSelectedSubcategoryId(subcategoryId); updateWorkbenchDraft({ workbenchGroupId: group.id, workbenchSubcategoryId: subcategoryId }); }}>{group.name}</button>)}
+          </div>
+          <div className={freeMode ? 'recipe-subcategories disabled-selector' : 'recipe-subcategories'}>
+            {activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={!freeMode && activeSubcategory?.id === subcategory.id ? 'selected' : ''} disabled={freeMode} onClick={() => { setSelectedSubcategoryId(subcategory.id); updateWorkbenchDraft({ workbenchSubcategoryId: subcategory.id }); }}>{subcategory.name}</button>)}
+          </div>
+          <div className={freeMode ? 'recipe-scroll disabled-tags' : 'recipe-scroll'}>
+            {categories.map((category) => (
+              <section className="recipe-category" key={category.id}>
+                <header><strong>{category.name}</strong><span>{selections[category.name] || '未选择'}</span></header>
+                <div className="recipe-tags">
+                  {category.tags.map((tag) => (
+                    <button type="button" key={tag.id} className={selections[category.name] === tag.name ? 'selected' : ''} onClick={() => selectTag(category, tag.name)} title={tag.prompt}>
+                      {tag.name}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
         </div>
         <button type="button" className="primary recipe-generate" onClick={() => generate()} disabled={running}>
           {running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}
@@ -995,28 +1066,36 @@ function WorkbenchPage({
       <main className="canvas-column">
         <div className="canvas-toolbar">
           <div>
-            <button type="button" className="secondary" onClick={pickReference}><ImagePlus size={16} />添加参考图</button>
-            {reference && <span className="reference-ready"><Check size={13} />{reference.name}</span>}
+            <button type="button" className="secondary" onClick={pickReferences}><ImagePlus size={16} />添加参考图</button>
+            {references.length > 0 && <span className="reference-ready"><Check size={13} />已上传 {references.length} 张 · 已连接 {references.filter((item) => item.linked).length} 张</span>}
           </div>
           <div>
             <button type="button" className="icon-button" title="缩小画布" onClick={() => setZoom((value) => Math.max(0.75, value - 0.125))}>-</button>
             <span className="zoom-value">{Math.round(zoom * 100)}%</span>
             <button type="button" className="icon-button" title="放大画布" onClick={() => setZoom((value) => Math.min(1.25, value + 0.125))}>+</button>
-            <button type="button" className="secondary" onClick={() => { setReference(null); setSelectedRecordId(''); setShowResult(false); }}><RefreshCw size={15} />清空画布</button>
+            <button type="button" className="secondary" onClick={() => { setReferences([]); setSelectedRecordId(''); setShowResult(false); }}><RefreshCw size={15} />清空画布</button>
           </div>
         </div>
         <div className="iteration-canvas">
           <div className="canvas-stage" style={{ transform: `scale(${zoom})` }}>
             <section className="canvas-node prompt-node">
               <header><span>提示词</span><small>与左侧标签同步</small></header>
-              <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+              <textarea value={prompt} onChange={(event) => { setPrompt(event.target.value); updateWorkbenchDraft({ workbenchPrompt: event.target.value }); }} />
               <div className="node-settings">
                 <label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
                 <label>画幅<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label>
                 <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label>
               </div>
-              {reference && <div className="node-reference"><LocalImage asset={reference} alt="迭代参考图" /><span>当前参考</span><button type="button" onClick={() => setReference(null)} title="移除参考图"><X size={13} /></button></div>}
             </section>
+
+            {references.map((item) => <div key={item.asset.id} className={item.linked ? 'reference-node linked' : 'reference-node'} style={{ left: item.x, top: item.y }} onPointerDown={(event) => {
+              if ((event.target as HTMLElement).closest('button')) return;
+              event.preventDefault();
+              referenceDrag.current = { id: item.asset.id, startX: event.clientX, startY: event.clientY, x: item.x, y: item.y };
+            }}>
+              <div className="reference-node-toolbar"><button type="button" className={item.linked ? 'selected' : ''} onClick={(event) => { event.stopPropagation(); setReferences((current) => current.map((entry) => entry.asset.id === item.asset.id ? { ...entry, linked: !entry.linked } : entry)); }}>{item.linked ? '已连接' : '未连接'}</button><button type="button" onClick={(event) => { event.stopPropagation(); setReferences((current) => current.filter((entry) => entry.asset.id !== item.asset.id)); }}><X size={13} /></button></div>
+              <LocalImage asset={item.asset} alt={item.asset.name} /><span title={item.asset.name}>{item.asset.name}</span>
+            </div>)}
 
             <div className="canvas-connector"><span /><ArrowRight size={18} /></div>
 
@@ -1344,6 +1423,60 @@ function StampPage({
       </div>
     </div>
   );
+}
+
+const DETAIL_GENERATE_SECTIONS = [
+  ['01', '首屏卖点总览', '用一张高冲击力主视觉讲清产品定位、核心卖点和使用场景。'],
+  ['02', '卖点总览', '以信息图方式展示 3-5 个最重要卖点，文字简洁清晰，产品保持主体。'],
+  ['03', '场景价值', '展示产品在真实生活或使用场景中的效果，突出用户收益和情绪价值。'],
+  ['04', '材质细节', '微距展示材质、结构、工艺和关键细节，配合克制的说明排版。'],
+  ['05', '规格参数', '用清晰的电商信息排版展示尺寸、规格、适用对象和使用说明。'],
+  ['06', '品质保障', '展示包装、服务、品质承诺或购买理由，形成完整详情页收尾。'],
+] as const;
+
+function DetailGeneratePage({ snapshot, onRefresh, onOpenSettings, onNotice, onAssets }: { snapshot: AppSnapshot; onRefresh: () => Promise<AppSnapshot>; onOpenSettings: () => void; onNotice: (message: string) => void; onAssets: (asset: AssetRecord) => void }) {
+  const [products, setProducts] = useState<AssetRecord[]>([]);
+  const [description, setDescription] = useState('');
+  const [platform, setPlatform] = useState('淘宝/天猫');
+  const [region, setRegion] = useState('中国大陆');
+  const [language, setLanguage] = useState('中文');
+  const [style, setStyle] = useState('高级简洁');
+  const [ratio, setRatio] = useState('3:4');
+  const [audience, setAudience] = useState('');
+  const [positioning, setPositioning] = useState('');
+  const [extra, setExtra] = useState('');
+  const [model, setModel] = useState(snapshot.settings.defaultModel);
+  const [resolution, setResolution] = useState('1K');
+  const [batchTag, setBatchTag] = useState('detail_generate');
+  const [running, setRunning] = useState(false);
+  const [editingSection, setEditingSection] = useState('');
+  const [sectionPrompts, setSectionPrompts] = useState<Record<string, string>>({});
+  const records = snapshot.generations.filter((record) => record.source === 'detail-generate');
+  const pending = records.filter((record) => record.status === 'pending').length;
+  const completedSections = DETAIL_GENERATE_SECTIONS.filter(([number]) => records.find((record) => record.taskName.startsWith(`${number} `))?.status === 'success').length;
+  const pickProducts = async () => { const assets = await window.imageStudio.pickImages(); if (assets.length === 0) return; assets.forEach(onAssets); setProducts((current) => [...current, ...assets].filter((asset, index, all) => all.findIndex((item) => item.id === asset.id) === index).slice(0, 5)); };
+  const buildBasePrompt = () => `请为电商商品生成高质量详情页图片。平台：${platform}；地区：${region}；语言：${language}；视觉风格：${style}；目标人群：${audience || '普通电商消费者'}；价格定位：${positioning || '中高端'}。\n\n产品特点与信息：${description.trim()}\n\n${extra.trim() ? `补充要求：${extra.trim()}\n\n` : ''}必须严格保持参考产品图的款式、颜色、材质、结构、比例和关键细节一致，不虚构不存在的产品功能，不改变品牌和产品身份。画面适合${platform}电商详情页，文字排版清晰可读，避免乱码、无关 Logo、水印和 AI 瑕疵。`;
+  const buildSectionPrompt = (number: string, instruction: string) => sectionPrompts[number] || `${buildBasePrompt()}\n\n本张详情模块：${instruction}`;
+  const generate = async () => {
+    if (products.length === 0) return onNotice('请先上传至少一张产品图');
+    if (!description.trim()) return onNotice('请先描述产品特点');
+    if (!snapshot.settings.hasApiKey) { onNotice('请先配置卡密'); onOpenSettings(); return; }
+    const refs = [products[0] ?? null, products[1] ?? null, products[2] ?? null];
+    const tasks: GenerationTask[] = DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => ({ id: newId(), name: `${number} ${title}`, tagGroupId: '', tagSubcategoryId: '', references: { garment: refs[0], side: refs[1], face: refs[2] }, detailAssets: products.slice(3), dimensions: {}, direction: title, category: '电商详情页生成', ratio, resolution, quantity: 1, model: modelForResolution(model, resolution), prompt: buildSectionPrompt(number, instruction) }));
+    setSectionPrompts(Object.fromEntries(tasks.map((task) => [task.name.slice(0, 2), task.prompt])));
+    setRunning(true);
+    try { await window.imageStudio.startGeneration({ batchTag, model, source: 'detail-generate', tasks }); await onRefresh(); onNotice('详情页生成任务已提交，共 6 张，正在后台生成'); } catch (error) { onNotice(error instanceof Error ? error.message : '详情页生成失败'); } finally { setRunning(false); }
+  };
+  const regenerateSection = async (number: string, title: string, instruction: string) => {
+    if (products.length === 0) return onNotice('请先上传至少一张产品图');
+    if (!description.trim()) return onNotice('请先描述产品特点');
+    if (!snapshot.settings.hasApiKey) { onNotice('请先配置卡密'); onOpenSettings(); return; }
+    const prompt = buildSectionPrompt(number, instruction).trim();
+    if (!prompt) return onNotice('该详情模块提示词不能为空');
+    const task: GenerationTask = { id: newId(), name: `${number} ${title}`, tagGroupId: '', tagSubcategoryId: '', references: { garment: products[0] ?? null, side: products[1] ?? null, face: products[2] ?? null }, detailAssets: products.slice(3), dimensions: {}, direction: title, category: '电商详情页生成', ratio, resolution, quantity: 1, model: modelForResolution(model, resolution), prompt };
+    try { await window.imageStudio.startGeneration({ batchTag: `${batchTag}-${number}`, model, source: 'detail-generate', tasks: [task] }); await onRefresh(); onNotice(`${number} ${title} 已重新提交`); } catch (error) { onNotice(error instanceof Error ? error.message : '重新生成失败'); }
+  };
+  return <div className="detail-generate-page"><section className="detail-generate-toolbar"><div><h2>详情页生成</h2><p>上传产品素材并描述特点，自动生成一套完整的电商详情页模块图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || pending > 0} onClick={generate}>{running || pending > 0 ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{pending > 0 ? `生成中 ${pending}/6` : '生成 6 张详情图'}</button></section><div className="detail-generate-layout"><main className="detail-generate-form"><section className="detail-generate-card"><header><h3>商品图 / 产品素材</h3><span>{products.length}/5</span></header><div className="product-asset-picker">{products.map((asset) => <div key={asset.id}><LocalImage asset={asset} alt={asset.name} /><button type="button" onClick={() => setProducts((current) => current.filter((item) => item.id !== asset.id))}><X size={13} /></button></div>)}<button type="button" className="product-add-button" onClick={pickProducts}><Plus size={22} /><span>添加产品图</span></button></div><small>可上传产品白底图、细节图、模特图或场景参考图，最多 5 张。</small></section><section className="detail-generate-card"><header><h3>产品信息与生成设置</h3></header><div className="detail-generate-fields"><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="输入商品信息、卖点、参数，例如：多场景可移动音箱，20W 功率，Hi-Res 双金标..." /><div className="detail-select-grid"><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option>淘宝/天猫</option><option>京东</option><option>拼多多</option><option>独立站</option></select><select value={region} onChange={(event) => setRegion(event.target.value)}><option>中国大陆</option><option>中国港澳台</option><option>北美</option><option>欧洲</option></select><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>中文</option><option>英文</option><option>中英双语</option></select><select value={style} onChange={(event) => setStyle(event.target.value)}><option>高级简洁</option><option>温暖生活方式</option><option>科技专业</option><option>轻奢质感</option></select></div><div className="detail-ratio-options"><span>图片比例</span>{['1:1', '3:4', '9:16'].map((value) => <button type="button" key={value} className={ratio === value ? 'selected' : ''} onClick={() => setRatio(value)}>{value}</button>)}</div><input value={audience} onChange={(event) => setAudience(event.target.value)} placeholder="目标人群，例如：宝妈、上班族、送礼人群" /><input value={positioning} onChange={(event) => setPositioning(event.target.value)} placeholder="价格定位，例如：中高端、性价比、礼盒款" /><input value={extra} onChange={(event) => setExtra(event.target.value)} placeholder="补充要求，例如：突出材质、参考图同款风格、强调售后服务" /><label className="detail-sync-check"><input type="checkbox" defaultChecked />一键同步参考图模式</label></div></section></main><aside className="detail-generate-results"><header><div><h3>详情页结果</h3><span>{completedSections}/6 已完成</span></div><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={14} />打开目录</button></header><div className="detail-result-grid">{DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => { const taskRecords = records.filter((record) => record.taskName.startsWith(`${number} `)); const latestRecord = taskRecords[0]; const promptValue = sectionPrompts[number] ?? latestRecord?.prompt ?? buildSectionPrompt(number, instruction); return <section key={number} className="detail-result-card"><header><strong>{number} {title}</strong><div className="detail-result-actions"><button type="button" onClick={() => setEditingSection((current) => current === number ? '' : number)}>{editingSection === number ? '收起' : '编辑提示词'}</button><button type="button" disabled={latestRecord?.status === 'pending'} onClick={() => regenerateSection(number, title, instruction)}><RefreshCw size={12} />重新生成</button><span>{latestRecord?.status === 'success' ? '完成' : latestRecord?.status === 'pending' ? '生成中' : '等待'}</span></div></header>{editingSection === number && <textarea className="detail-section-prompt" value={promptValue} onChange={(event) => setSectionPrompts((current) => ({ ...current, [number]: event.target.value }))} />}<TaskResults records={taskRecords.slice(0, 1)} /></section>; })}</div></aside></div></div>;
 }
 
 const DEFAULT_3D_PROMPT = '100%还原服装细节和颜色，居中构图，正面视角。纯白色背景，专业摄影棚灯光，柔和阴影，干净的产品摄影风格，高端电商服饰展示。立体衣身结构清晰自然，面料纹理、厚薄、缝线、包边和装饰细节准确，高清纹理渲染，写实效果。不要模特、衣架、文字、Logo、水印和多余道具。';
@@ -1685,10 +1818,10 @@ function TemplatesPage({
             <div className="preset-parameter-grid">
               <label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
               <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label>
-              <label>正面数量<input type="number" min="0" value={queueOutput.frontQuantity} onChange={(event) => setQueueOutput({ ...queueOutput, frontQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)) })} /></label>
               <div className="preset-ratio-field"><span>正面比例</span><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(queueOutput.frontRatios, queueOutput.frontRatio)} onChange={(values) => setQueueOutput({ ...queueOutput, frontRatios: values, frontRatio: values[0] })} /></div>
-              <label>侧面数量<input type="number" min="0" value={queueOutput.sideQuantity} onChange={(event) => setQueueOutput({ ...queueOutput, sideQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)) })} /></label>
+              <div className="ratio-quantity-grid">{normalizedGenerationRatios(queueOutput.frontRatios, queueOutput.frontRatio).map((ratio) => <label key={ratio}>{ratio} 数量<input type="number" min="0" value={queueRatioQuantity(queueOutput, 'front', ratio)} onChange={(event) => setQueueOutput({ ...queueOutput, frontRatioQuantities: { ...queueOutput.frontRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } })} /></label>)}</div>
               <div className="preset-ratio-field"><span>侧面比例</span><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(queueOutput.sideRatios, queueOutput.sideRatio)} onChange={(values) => setQueueOutput({ ...queueOutput, sideRatios: values, sideRatio: values[0] })} /></div>
+              <div className="ratio-quantity-grid">{normalizedGenerationRatios(queueOutput.sideRatios, queueOutput.sideRatio).map((ratio) => <label key={ratio}>{ratio} 数量<input type="number" min="0" value={queueRatioQuantity(queueOutput, 'side', ratio)} onChange={(event) => setQueueOutput({ ...queueOutput, sideRatioQuantities: { ...queueOutput.sideRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } })} /></label>)}</div>
             </div>
           </section>
         </div>
@@ -1702,7 +1835,7 @@ function TemplatesPage({
             <header><div className="template-icon"><WandSparkles size={18} /></div><div><h3>{template.name}</h3><span>{formatDate(template.createdAt)}</span></div></header>
             <div className="preset-card-faces"><div>{template.sharedFront ? <LocalImage asset={template.sharedFront} alt="共享正面图" /> : <ImagePlus size={20} />}</div><div>{template.sharedSide ? <LocalImage asset={template.sharedSide} alt="共享侧脸图" /> : <span>侧脸可选</span>}</div></div>
             <p>{template.prompt}</p>
-            <div className="preset-tags"><span>{template.resolution ?? '1K'}</span><span>正 {template.queueOutput?.frontQuantity ?? 10} × {normalizedGenerationRatios(template.queueOutput?.frontRatios, template.queueOutput?.frontRatio ?? '1:1').join('、')}</span><span>侧 {template.queueOutput?.sideQuantity ?? 0} × {normalizedGenerationRatios(template.queueOutput?.sideRatios, template.queueOutput?.sideRatio ?? '3:4').join('、')}</span><span>{template.model ?? snapshot.settings.defaultModel}</span></div>
+            <div className="preset-tags"><span>{template.resolution ?? '1K'}</span><span>正 {template.queueOutput ? normalizedGenerationRatios(template.queueOutput.frontRatios, template.queueOutput.frontRatio).map((ratio) => `${ratio}×${queueRatioQuantity(template.queueOutput!, 'front', ratio)}`).join('、') : '1:1×10'}</span><span>侧 {template.queueOutput ? normalizedGenerationRatios(template.queueOutput.sideRatios, template.queueOutput.sideRatio).map((ratio) => `${ratio}×${queueRatioQuantity(template.queueOutput!, 'side', ratio)}`).join('、') : '3:4×0'}</span><span>{template.model ?? snapshot.settings.defaultModel}</span></div>
             <footer><button type="button" className="primary" onClick={() => onApply(template)}>应用到模板队列</button><button type="button" className="icon-button" title="删除预设" onClick={() => onSave(snapshot.templates.filter((item) => item.id !== template.id))}><Trash2 size={16} /></button></footer>
           </article>
         ))}
@@ -1903,8 +2036,21 @@ function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
     { value: 'workbench', label: '工作台' },
     { value: 'stamp', label: '贴标' },
     { value: 'garment3d', label: '3D白底' },
+    { value: 'detail-generate', label: '详情页生成' },
     { value: 'detail', label: '详情页' },
   ];
+  const previewIndex = preview ? filtered.findIndex((record) => record.id === preview.id) : -1;
+  const showPrevious = () => {
+    if (filtered.length === 0) return;
+    setPreview(filtered[(previewIndex - 1 + filtered.length) % filtered.length]);
+  };
+  const showNext = () => {
+    if (filtered.length === 0) return;
+    setPreview(filtered[(previewIndex + 1) % filtered.length]);
+  };
+  useEffect(() => {
+    if (preview && !filtered.some((record) => record.id === preview.id)) setPreview(null);
+  }, [filtered, preview]);
 
   return (
     <div className="content-page">
@@ -1926,7 +2072,7 @@ function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
           </article>)}
         </div>
       )}
-      {preview && <ImagePreviewModal record={preview} onClose={() => setPreview(null)} />}
+      {preview && <ImagePreviewModal record={preview} onClose={() => setPreview(null)} onPrevious={showPrevious} onNext={showNext} />}
     </div>
   );
 }
@@ -2131,6 +2277,8 @@ export default function App() {
     });
   }, [refresh]);
 
+  useEffect(() => window.imageStudio.onDataChanged(() => { void refresh(); }), [refresh]);
+
   useEffect(() => {
     if (!loaded) return;
     const timer = window.setTimeout(() => window.imageStudio.saveDraft(draft).catch(() => undefined), 450);
@@ -2184,10 +2332,10 @@ export default function App() {
           const references = { ...task.references, sharedFront, sharedSide };
           const fixedDimensions = preset?.dimensions ?? task.dimensions;
           const directions = [
-            { name: '正面', count: output.frontQuantity, ratios: normalizedGenerationRatios(output.frontRatios, output.frontRatio) },
-            { name: '侧面', count: output.sideQuantity, ratios: normalizedGenerationRatios(output.sideRatios, output.sideRatio) },
+            { name: '正面', direction: 'front' as const, ratios: normalizedGenerationRatios(output.frontRatios, output.frontRatio) },
+            { name: '侧面', direction: 'side' as const, ratios: normalizedGenerationRatios(output.sideRatios, output.sideRatio) },
           ];
-          return directions.flatMap((direction) => direction.ratios.flatMap((ratio) => Array.from({ length: Math.max(0, direction.count) }, (_, index) => {
+          return directions.flatMap((direction) => direction.ratios.flatMap((ratio) => Array.from({ length: queueRatioQuantity(output, direction.direction, ratio) }, (_, index) => {
             const dimensions = resolveRandomDimensions(subcategory, fixedDimensions);
             const generatedTask: GenerationTask = {
               ...task,
@@ -2223,8 +2371,9 @@ export default function App() {
             ...task,
             name: ratios.length > 1 ? `${task.name} ${ratio}` : task.name,
             ratio,
+            quantity: taskRatioQuantity(task, ratio),
             model: modelForResolution(task.model || draft.model, task.resolution),
-          }));
+          })).filter((task) => task.quantity > 0);
         });
     if (requestTasks.length === 0) {
       const missingFace = draft.mode === 'template' && visibleTasks.some((task) => {
@@ -2304,11 +2453,12 @@ export default function App() {
         <Topbar page={page} settings={snapshot.settings} onSettings={() => setPage('settings')} mode={draft.mode} onMode={changeStudioMode} />
         <div className="page-body">
           {page === 'studio' && <StudioPage snapshot={snapshot} draft={draft} progress={progress} generating={generating} onDraft={updateDraft} onGenerate={generate} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
-          {page === 'workbench' && <WorkbenchPage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
+          {page === 'workbench' && <WorkbenchPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'templates' && <TemplatesPage snapshot={snapshot} draft={draft} onSave={saveTemplates} onApply={applyTemplate} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
           {page === 'assets' && <AssetsPage generations={snapshot.generations} />}
           {page === 'stamp' && <StampPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'garment3d' && <Garment3DPage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
+          {page === 'detail-generate' && <DetailGeneratePage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
           {page === 'detail' && <DetailPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'tags' && <TagsPage groups={snapshot.tagGroups} onSave={saveTags} />}
           {page === 'batches' && <BatchesPage snapshot={snapshot} onRefresh={refresh} onNotice={setNotice} />}

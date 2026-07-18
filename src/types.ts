@@ -1,6 +1,6 @@
 export type InvocationMode = 'async' | 'sync';
-export type GenerationSource = 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail';
-export type PageId = 'studio' | 'workbench' | 'templates' | 'assets' | 'stamp' | 'garment3d' | 'detail' | 'tags' | 'batches' | 'settings';
+export type GenerationSource = 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail' | 'detail-generate';
+export type PageId = 'studio' | 'workbench' | 'templates' | 'assets' | 'stamp' | 'garment3d' | 'detail-generate' | 'detail' | 'tags' | 'batches' | 'settings';
 
 export interface PublicSettings {
   defaultModel: string;
@@ -51,6 +51,7 @@ export interface GenerationTask {
   ratio: string;
   resolution: string;
   quantity: number;
+  ratioQuantities?: Record<string, number>;
   prompt: string;
   model?: string;
   queuePresetId?: string;
@@ -151,6 +152,8 @@ export interface DraftState {
     sideRatio: string;
     frontRatios?: string[];
     sideRatios?: string[];
+    frontRatioQuantities?: Record<string, number>;
+    sideRatioQuantities?: Record<string, number>;
   };
   queueRandomInitialized?: boolean;
   detailSharedPrompt?: string;
@@ -158,6 +161,11 @@ export interface DraftState {
   detailBatchTag?: string;
   outputRatios?: string[];
   stampPrompt?: string;
+  workbenchFreeMode?: boolean;
+  workbenchGroupId?: string;
+  workbenchSubcategoryId?: string;
+  workbenchPrompt?: string;
+  workbenchSelections?: Record<string, string>;
 }
 
 export interface AppSnapshot {

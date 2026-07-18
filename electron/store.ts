@@ -22,6 +22,15 @@ const LEGACY_SHARED_DIMENSIONS = ['图片类型', '展示方式', '模特类型'
 
 type LegacyTagGroup = Partial<TagGroup> & { id?: string; name?: string; dimensions?: TagCategory[] };
 
+function migrateLegacyPromptText<T>(value: T): T {
+  if (typeof value === 'string') return value.replaceAll('8岁东亚小女孩', '专业舞蹈儿童女模特') as T;
+  if (Array.isArray(value)) return value.map((item) => migrateLegacyPromptText(item)) as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, migrateLegacyPromptText(item)])) as T;
+  }
+  return value;
+}
+
 function normalizeTagGroups(rawGroups: LegacyTagGroup[], defaults: TagGroup[]): TagGroup[] {
   return rawGroups.map((raw, groupIndex) => {
     const fallbackGroup = defaults.find((group) => group.id === raw.id) ?? defaults[groupIndex];
@@ -162,6 +171,11 @@ function defaultState(): StoredState {
       detailBatchTag: 'relayout',
       outputRatios: ['3:4'],
       stampPrompt: '',
+      workbenchFreeMode: false,
+      workbenchGroupId: '',
+      workbenchSubcategoryId: '',
+      workbenchPrompt: '',
+      workbenchSelections: {},
     },
   };
 }
@@ -200,7 +214,7 @@ export class LocalStore {
   private load(): StoredState {
     if (!fs.existsSync(this.statePath)) return defaultState();
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as Partial<StoredState>;
+      const parsed = migrateLegacyPromptText(JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as Partial<StoredState>);
       const fallback = defaultState();
       const tagGroups = Array.isArray(parsed.tagGroups) && parsed.tagGroups.length > 0
         ? normalizeTagGroups(parsed.tagGroups as LegacyTagGroup[], fallback.tagGroups)
@@ -268,6 +282,10 @@ export class LocalStore {
   }
 
   snapshot(): AppSnapshot {
+    const missingPaths = new Set<string>();
+    this.state.assets.forEach((asset) => { if (!fs.existsSync(asset.localPath)) missingPaths.add(asset.localPath); });
+    this.state.generations.forEach((record) => { if (record.status === 'success' && record.outputPath && !fs.existsSync(record.outputPath)) missingPaths.add(record.outputPath); });
+    missingPaths.forEach((missingPath) => this.deleteImageByPath(missingPath));
     const settings: PublicSettings = {
       defaultModel: this.state.settings.defaultModel,
       invocationMode: this.state.settings.invocationMode,
@@ -446,6 +464,33 @@ export class LocalStore {
 
   pendingGenerations(): GenerationRecord[] {
     return this.state.generations.filter((record) => record.status === 'pending').map((record) => ({ ...record }));
+  }
+
+  deleteImageByPath(localPath: string): boolean {
+    const normalized = path.resolve(localPath);
+    const allowedRoots = [this.assetDirectory, this.outputDirectory].map((root) => path.resolve(root));
+    if (!allowedRoots.some((root) => normalized.startsWith(`${root}${path.sep}`))) throw new Error('只能删除软件工作目录中的图片');
+    if (fs.existsSync(normalized)) fs.unlinkSync(normalized);
+    const beforeAssets = this.state.assets.length;
+    const beforeGenerations = this.state.generations.length;
+    this.state.assets = this.state.assets.filter((asset) => path.resolve(asset.localPath) !== normalized);
+    this.state.generations = this.state.generations.filter((record) => !record.outputPath || path.resolve(record.outputPath) !== normalized);
+    const cleanTask = (task: DraftState['tasks'][number]) => ({
+      ...task,
+      references: Object.fromEntries(Object.entries(task.references).map(([key, asset]) => [key, asset && path.resolve(asset.localPath) === normalized ? null : asset])) as typeof task.references,
+      detailAssets: task.detailAssets?.filter((asset) => path.resolve(asset.localPath) !== normalized),
+    });
+    this.state.draft.tasks = this.state.draft.tasks.map(cleanTask);
+    this.state.draft.detailTasks = this.state.draft.detailTasks?.map(cleanTask);
+    if (this.state.draft.queueShared.front && path.resolve(this.state.draft.queueShared.front.localPath) === normalized) this.state.draft.queueShared.front = null;
+    if (this.state.draft.queueShared.side && path.resolve(this.state.draft.queueShared.side.localPath) === normalized) this.state.draft.queueShared.side = null;
+    this.state.templates = this.state.templates.map((template) => ({
+      ...template,
+      sharedFront: template.sharedFront && path.resolve(template.sharedFront.localPath) === normalized ? null : template.sharedFront,
+      sharedSide: template.sharedSide && path.resolve(template.sharedSide.localPath) === normalized ? null : template.sharedSide,
+    }));
+    this.persist();
+    return beforeAssets !== this.state.assets.length || beforeGenerations !== this.state.generations.length;
   }
 
   getBatch(batchId: string): BatchRecord | undefined {

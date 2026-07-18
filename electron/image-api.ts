@@ -91,23 +91,33 @@ function apiAspectRatio(value: string): string {
   return `${width}:${height}`;
 }
 
-function apiExactSize(aspectRatio: string): string {
-  const presets: Record<string, string> = {
-    '1:1': '1024x1024',
-    '3:4': '768x1024',
-    '9:16': '720x1280',
-    '16:9': '1280x720',
-  };
-  return presets[aspectRatio] ?? aspectRatio;
-}
-
 function endpoint(kind: 'generations' | 'edits', taskId?: string): string {
   return `${API_BASE_URL}/images/${kind}${taskId ? `/${encodeURIComponent(taskId)}` : ''}`;
 }
 
 function errorDetail(body: ApiBody, status?: number): string {
   const detail = typeof body.error === 'string' ? body.error : body.error?.message ?? body.message;
-  return detail || (status ? `生图服务返回 HTTP ${status}` : '生图任务执行失败');
+  const moderationMessage = (value: string) => {
+    const normalized = value.toLowerCase();
+    return normalized.includes('image_unsafe')
+      || normalized.includes('content moderation')
+      || normalized.includes('safety polic')
+      || normalized.includes('unsafe')
+      || normalized.includes('未通过内容审查');
+  };
+  if (detail) return moderationMessage(detail) ? '您的提示词或参考素材未通过内容审查，请修改后重新提交。' : detail;
+  const rawUrl = body.data?.[0]?.url;
+  if (rawUrl?.startsWith('poll failed:')) {
+    const payload = rawUrl.replace(/^poll failed:\s*\d+\s*/, '');
+    try {
+      const parsed = JSON.parse(payload) as { error_code?: string; message?: string };
+      if (parsed.error_code === 'image_unsafe' || (parsed.message && moderationMessage(parsed.message))) return '您的提示词或参考素材未通过内容审查，请修改后重新提交。';
+      return [parsed.error_code, parsed.message].filter(Boolean).join('：') || payload;
+    } catch {
+      return payload;
+    }
+  }
+  return status ? `生图服务返回 HTTP ${status}` : '生图任务执行失败';
 }
 
 async function readApiBody(response: Response): Promise<ApiBody> {
@@ -141,12 +151,12 @@ async function pollTask(
       signal: AbortSignal.timeout(30_000),
     });
     const body = await readApiBody(response);
-    const result = await downloadResult(body);
-    if (result) return result;
     const status = body.status?.toLowerCase();
     if (['failed', 'error', 'cancelled', 'canceled'].includes(status ?? '')) {
       throw new Error(errorDetail(body));
     }
+    const result = await downloadResult(body);
+    if (result) return result;
   }
   throw new Error('异步生图任务等待超时，请稍后在任务记录中重试');
 }
@@ -208,6 +218,10 @@ async function postWithFixedBody(
         });
         return readApiBody(response);
       });
+      const responseStatus = responseBody.status?.toLowerCase();
+      if (['failed', 'error', 'cancelled', 'canceled'].includes(responseStatus ?? '')) {
+        throw new Error(errorDetail(responseBody));
+      }
       const immediate = await downloadResult(responseBody);
       if (!immediate && responseBody.id) onTaskAccepted?.(kind, responseBody.id);
       const result = immediate ?? (responseBody.id ? await pollTask(kind, responseBody.id, { Authorization: headers.Authorization }) : null);
@@ -225,7 +239,6 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   const headers = { Authorization: `Bearer ${input.apiKey}` };
   const isAsync = input.settings.invocationMode === 'async';
   const aspectRatio = apiAspectRatio(input.ratio);
-  const size = apiExactSize(aspectRatio);
   const quality = input.resolution.toUpperCase() === '2K' ? 'high' : 'medium';
 
   if (input.references.length === 0) {
@@ -235,7 +248,7 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
       n: 1,
       prompt: input.prompt,
       quality,
-      size,
+      size: aspectRatio,
     });
     return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.settings.concurrencyLimit, input.onTaskAccepted);
   }
@@ -247,7 +260,7 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
     ['prompt', input.prompt],
     ['n', '1'],
     ['quality', quality],
-    ['size', size],
+    ['size', aspectRatio],
   ], input.references);
   return postWithFixedBody('edits', {
     ...headers,

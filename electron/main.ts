@@ -63,9 +63,11 @@ function createBatchPrefix(source: StartGenerationRequest['source']): string {
           ? 'STAMP'
           : source === 'garment3d'
             ? 'GARMENT3D'
-            : source === 'detail'
-              ? 'DETAIL'
-            : 'MULTI';
+            : source === 'detail-generate'
+              ? 'DETAILGEN'
+              : source === 'detail'
+                ? 'DETAIL'
+                : 'MULTI';
   const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
   return `${type}-${timestamp}`;
 }
@@ -352,12 +354,28 @@ app.whenReady().then(() => {
     fs.copyFileSync(localPath, result.filePath);
     return true;
   });
+  ipcMain.handle('image:report-missing', (_event, localPath: string) => {
+    if (fs.existsSync(localPath)) return false;
+    const removed = store.deleteImageByPath(localPath);
+    if (removed) mainWindow?.webContents.send('app:data-changed');
+    return removed;
+  });
   ipcMain.handle('image:context-menu', (event, localPath: string, suggestedName: string) => {
     Menu.buildFromTemplate([
       { label: '复制图片', click: () => clipboard.writeImage(nativeImage.createFromPath(localPath)) },
       { label: '下载图片…', click: async () => {
         const result = await dialog.showSaveDialog(mainWindow!, { defaultPath: suggestedName || path.basename(localPath) });
         if (!result.canceled && result.filePath) fs.copyFileSync(localPath, result.filePath);
+      } },
+      { type: 'separator' },
+      { label: '彻底删除图片…', click: async () => {
+        const confirmation = await dialog.showMessageBox(mainWindow!, {
+          type: 'warning', buttons: ['取消', '彻底删除'], defaultId: 0, cancelId: 0,
+          title: '彻底删除图片', message: '确定要彻底删除这张图片吗？', detail: '图片文件和软件中的对应记录都会删除，此操作无法撤销。',
+        });
+        if (confirmation.response !== 1) return;
+        store.deleteImageByPath(localPath);
+        mainWindow?.webContents.send('app:data-changed');
       } },
     ]).popup({ window: BrowserWindow.fromWebContents(event.sender) ?? mainWindow ?? undefined });
   });

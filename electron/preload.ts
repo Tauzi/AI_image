@@ -29,9 +29,15 @@ contextBridge.exposeInMainWorld('imageStudio', {
   copyImage: (localPath: string) => ipcRenderer.invoke('image:copy', localPath),
   downloadImage: (localPath: string, suggestedName: string) => ipcRenderer.invoke('image:download', localPath, suggestedName),
   showImageContextMenu: (localPath: string, suggestedName: string) => ipcRenderer.invoke('image:context-menu', localPath, suggestedName),
+  reportMissingImage: (localPath: string) => ipcRenderer.invoke('image:report-missing', localPath),
   onGenerationProgress: (listener: (progress: GenerationProgress) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: GenerationProgress) => listener(progress);
     ipcRenderer.on('generation:progress', handler);
     return () => ipcRenderer.removeListener('generation:progress', handler);
+  },
+  onDataChanged: (listener: () => void) => {
+    const handler = () => listener();
+    ipcRenderer.on('app:data-changed', handler);
+    return () => ipcRenderer.removeListener('app:data-changed', handler);
   },
 });

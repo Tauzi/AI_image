@@ -30,7 +30,7 @@ declare global {
       startGeneration: (request: {
         batchTag: string;
         model: string;
-        source: 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail';
+        source: 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail' | 'detail-generate';
         tasks: DraftState['tasks'];
       }) => Promise<{ batchId: string }>;
       openWorkspaceDirectory: () => Promise<string>;
@@ -39,7 +39,9 @@ declare global {
       copyImage: (localPath: string) => Promise<void>;
       downloadImage: (localPath: string, suggestedName: string) => Promise<boolean>;
       showImageContextMenu: (localPath: string, suggestedName: string) => Promise<void>;
+      reportMissingImage: (localPath: string) => Promise<boolean>;
       onGenerationProgress: (listener: (progress: GenerationProgress) => void) => () => void;
+      onDataChanged: (listener: () => void) => () => void;
     };
   }
 }
