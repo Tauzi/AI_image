@@ -1,15 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AssetRecord, StoredSettings } from './types';
+import type { AssetRecord, StoredImageService, StoredSettings } from './types';
 
-const API_BASE_URL = 'https://mianyunai.com/v1';
 const ASYNC_TIMEOUT_MS = 10 * 60 * 1000;
 const POLL_INTERVAL_MS = 8_000;
 const MAX_POST_ATTEMPTS = 3;
 
 interface GenerateImageInput {
   settings: StoredSettings;
+  service: StoredImageService;
   apiKey: string;
   prompt: string;
   model: string;
@@ -39,23 +39,11 @@ interface ApiBody {
   message?: string;
 }
 
-const API_SIZES: Record<string, string> = {
-  '1:1': '1024x1024',
-  '3:4': '768x1024',
-  '9:16': '576x1024',
-};
-
-function apiAspectRatio(value: string): string {
-  const match = /^([1-9]\d*):([1-9]\d*)$/.exec(value.trim());
-  if (!match) throw new Error(`非法生图比例：${value}，比例必须是正整数 W:H`);
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) throw new Error(`非法生图比例：${value}`);
-  const longShortRatio = Math.max(width, height) / Math.min(width, height);
-  if (longShortRatio > 3) throw new Error(`非法生图比例：${value}，长短边比例不能超过 3:1`);
-  const size = API_SIZES[`${width}:${height}`];
-  if (!size) throw new Error('目前仅支持 1:1、3:4 和 9:16 生图比例');
-  return size;
+function apiImageSize(settings: StoredSettings, ratio: string): string {
+  const size = settings.imageRatios.find((preset) => preset.name === ratio)?.size ?? ratio;
+  const normalized = size.trim().toLowerCase().replace('×', 'x');
+  if (!/^[1-9]\d*x[1-9]\d*$/.test(normalized)) throw new Error(`生图尺寸无效：${size}`);
+  return normalized;
 }
 
 export function modelForInvocation(model: string, invocationMode: StoredSettings['invocationMode']): string {
@@ -66,8 +54,8 @@ export function modelForInvocation(model: string, invocationMode: StoredSettings
   return normalized;
 }
 
-function endpoint(kind: 'generations' | 'edits', taskId?: string): string {
-  return `${API_BASE_URL}/images/${kind}${taskId ? `/${encodeURIComponent(taskId)}` : ''}`;
+function endpoint(baseUrl: string, kind: 'generations' | 'edits', taskId?: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}/images/${kind}${taskId ? `/${encodeURIComponent(taskId)}` : ''}`;
 }
 
 function errorDetail(body: ApiBody, status?: number): string {
@@ -116,11 +104,12 @@ async function pollTask(
   kind: 'generations' | 'edits',
   taskId: string,
   headers: { Authorization: string },
+  baseUrl: string,
 ): Promise<DownloadedImage> {
   const deadline = Date.now() + ASYNC_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    const response = await fetch(endpoint(kind, taskId), {
+    const response = await fetch(endpoint(baseUrl, kind, taskId), {
       method: 'GET',
       headers,
       signal: AbortSignal.timeout(30_000),
@@ -178,12 +167,13 @@ async function postWithFixedBody(
   kind: 'generations' | 'edits',
   headers: Record<string, string>,
   body: string | Buffer,
+  baseUrl: string,
   onTaskAccepted?: (kind: 'generations' | 'edits', taskId: string) => void,
 ): Promise<GeneratedImage> {
   let lastError: unknown;
   for (let attempts = 1; attempts <= MAX_POST_ATTEMPTS; attempts += 1) {
     try {
-      const response = await fetch(endpoint(kind), {
+      const response = await fetch(endpoint(baseUrl, kind), {
         method: 'POST',
         headers,
         body: body as unknown as BodyInit,
@@ -196,7 +186,7 @@ async function postWithFixedBody(
       }
       const immediate = await downloadResult(responseBody);
       if (!immediate && responseBody.id) onTaskAccepted?.(kind, responseBody.id);
-      const result = immediate ?? (responseBody.id ? await pollTask(kind, responseBody.id, { Authorization: headers.Authorization }) : null);
+      const result = immediate ?? (responseBody.id ? await pollTask(kind, responseBody.id, { Authorization: headers.Authorization }, baseUrl) : null);
       if (!result) throw new Error('生图服务未返回任务 ID 或可识别的图片数据');
       return { ...result, attempts };
     } catch (error) {
@@ -211,7 +201,7 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   const headers = { Authorization: `Bearer ${input.apiKey}` };
   const isAsync = input.settings.invocationMode === 'async';
   const model = modelForInvocation(input.model, input.settings.invocationMode);
-  const size = apiAspectRatio(input.ratio);
+  const size = apiImageSize(input.settings, input.ratio);
   const quality = input.resolution.toUpperCase() === '2K' ? 'high' : 'medium';
 
   if (input.references.length === 0) {
@@ -223,10 +213,10 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
       quality,
       size,
     });
-    return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.onTaskAccepted);
+    return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.service.baseUrl, input.onTaskAccepted);
   }
 
-  const boundary = `----MufenImageAI${randomUUID().replace(/-/g, '')}`;
+  const boundary = `----EcommerceWorkbench${randomUUID().replace(/-/g, '')}`;
   const body = createMultipartBody(boundary, [
     ['async', String(isAsync)],
     ['model', model],
@@ -238,11 +228,11 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   return postWithFixedBody('edits', {
     ...headers,
     'Content-Type': `multipart/form-data; boundary=${boundary}`,
-  }, body, input.onTaskAccepted);
+  }, body, input.service.baseUrl, input.onTaskAccepted);
 }
 
-export async function resumeImageTask(kind: 'generations' | 'edits', taskId: string, apiKey: string): Promise<GeneratedImage> {
-  if (!apiKey) throw new Error('卡密缺失，无法恢复异步任务查询');
-  const result = await pollTask(kind, taskId, { Authorization: `Bearer ${apiKey}` });
+export async function resumeImageTask(kind: 'generations' | 'edits', taskId: string, apiKey: string, baseUrl: string): Promise<GeneratedImage> {
+  if (!apiKey) throw new Error('API Key 缺失，无法恢复异步任务查询');
+  const result = await pollTask(kind, taskId, { Authorization: `Bearer ${apiKey}` }, baseUrl);
   return { ...result, attempts: 1 };
 }

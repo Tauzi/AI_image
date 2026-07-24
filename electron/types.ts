@@ -1,15 +1,49 @@
 export type InvocationMode = 'async' | 'sync';
 export type GenerationSource = 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail' | 'detail-generate';
 
-export interface PublicSettings {
-  defaultModel: string;
-  invocationMode: InvocationMode;
+export interface ImageService {
+  id: string;
+  name: string;
+  baseUrl: string;
   hasApiKey: boolean;
 }
 
-export interface StoredSettings extends Omit<PublicSettings, 'hasApiKey'> {
+export interface ImageServiceInput extends Omit<ImageService, 'hasApiKey'> {
+  apiKey?: string;
+}
+
+export interface ImageRatioPreset {
+  id: string;
+  name: string;
+  size: string;
+}
+
+export interface PublicSettings {
+  defaultModel: string;
+  invocationMode: InvocationMode;
+  activeServiceId: string;
+  services: ImageService[];
+  imageRatios: ImageRatioPreset[];
+  hasApiKey: boolean;
+}
+
+export interface SettingsInput {
+  defaultModel: string;
+  invocationMode: InvocationMode;
+  activeServiceId: string;
+  services: ImageServiceInput[];
+  imageRatios: ImageRatioPreset[];
+}
+
+export interface StoredImageService extends Omit<ImageService, 'hasApiKey'> {
   apiKeyProtected: string;
   apiKeyPlain: string;
+}
+
+export interface StoredSettings extends Omit<PublicSettings, 'hasApiKey' | 'services'> {
+  services: StoredImageService[];
+  apiKeyProtected?: string;
+  apiKeyPlain?: string;
 }
 
 export interface AssetRecord {
@@ -122,6 +156,7 @@ export interface GenerationRecord {
   createdAt: string;
   remoteTaskId?: string;
   remoteKind?: 'generations' | 'edits';
+  remoteServiceId?: string;
   outputBaseName?: string;
   stampPostProcess?: StampPostProcess;
 }
@@ -171,7 +206,7 @@ export interface DraftState {
 }
 
 export interface StoredState {
-  version: 1;
+  version: 2;
   settings: StoredSettings;
   assets: AssetRecord[];
   generations: GenerationRecord[];

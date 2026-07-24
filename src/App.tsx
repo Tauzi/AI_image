@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   ArrowRight,
   Archive,
@@ -13,7 +13,6 @@ import {
   Image,
   Images,
   Layers3,
-  LockKeyhole,
   LoaderCircle,
   ImagePlus,
   Maximize2,
@@ -40,14 +39,13 @@ import type {
   PageId,
   PromptTemplate,
   PublicSettings,
+  SettingsInput,
   ReferenceSlots,
   TagCategory,
   TagGroup,
   TagSubcategory,
 } from './types';
-import logoUrl from './assets/logo.png';
-
-const SETTINGS_ACCESS_PASSWORD = 'lilei888';
+import logoUrl from './assets/workbench-logo.svg';
 
 const DETAIL_SHARED_PROMPT = `请对这张电商详情页进行大幅度重新排版设计，必须产生明显不同于原图的全新布局。
 
@@ -81,7 +79,7 @@ const DEFAULT_STAMP_PROMPT = `请基于产品图生成高保真的电商定制�
 负面约束：删除原图案、修改原文字、清空贴标区域、预先生成客户 Logo、多余水印、无关文字、重绘产品主体。`;
 
 const LABEL_DIMENSIONS = ['图片类型', '展示方式', '模特类型', '动作', '核心卖点', '适用场景', '背景', '视觉风格', '文案排版'];
-const SUPPORTED_ASPECT_RATIOS = ['1:1', '3:4'];
+const DEFAULT_ASPECT_RATIOS = ['1:1', '3:4', '9:16'];
 const DEFAULT_IMAGE_MODEL = 'gpt-image-2-async';
 const TWO_K_IMAGE_MODEL = 'gpt-image-2-2k-async';
 
@@ -96,13 +94,19 @@ const PAGE_META: Record<PageId, { title: string; subtitle: string }> = {
   detail: { title: '详情页重排', subtitle: '批量上传详情图，以共享或独立提示词生成全新排版' },
   tags: { title: '标签管理', subtitle: '管理可选择并替换到生图提示词中的标签' },
   batches: { title: '批次记录', subtitle: '追踪每次批量任务的完成情况' },
-  settings: { title: '服务设置', subtitle: '配置卡密、调用模式与本地工作目录' },
+  settings: { title: '服务设置', subtitle: '配置生图服务、API Key、自定义比例与本地工作目录' },
 };
 
-function normalizedGenerationRatios(values: string[] | undefined, fallback: string): string[] {
-  const selected = (values ?? []).filter((ratio) => SUPPORTED_ASPECT_RATIOS.includes(ratio));
-  if (selected.length > 0) return SUPPORTED_ASPECT_RATIOS.filter((ratio) => selected.includes(ratio));
-  return [SUPPORTED_ASPECT_RATIOS.includes(fallback) ? fallback : SUPPORTED_ASPECT_RATIOS[0]];
+function ratioNames(settings: PublicSettings): string[] {
+  const values = settings.imageRatios.map((preset) => preset.name).filter(Boolean);
+  return values.length > 0 ? values : DEFAULT_ASPECT_RATIOS;
+}
+
+function normalizedGenerationRatios(values: string[] | undefined, fallback: string, available?: string[]): string[] {
+  const options = available ?? Array.from(new Set([...DEFAULT_ASPECT_RATIOS, ...(values ?? []), fallback].filter(Boolean)));
+  const selected = (values ?? []).filter((ratio) => options.includes(ratio));
+  if (selected.length > 0) return options.filter((ratio) => selected.includes(ratio));
+  return [options.includes(fallback) ? fallback : options[0]];
 }
 
 function queueRatioQuantity(output: DraftState['queueOutput'], direction: 'front' | 'side', ratio: string): number {
@@ -207,6 +211,13 @@ function emptySnapshot(): AppSnapshot {
     settings: {
       defaultModel: 'gpt-image-2-async',
       invocationMode: 'async',
+      activeServiceId: '',
+      services: [],
+      imageRatios: [
+        { id: 'ratio-square', name: '1:1', size: '1024x1024' },
+        { id: 'ratio-portrait', name: '3:4', size: '768x1024' },
+        { id: 'ratio-tall', name: '9:16', size: '576x1024' },
+      ],
       hasApiKey: false,
     },
     assets: [],
@@ -298,8 +309,8 @@ function Sidebar({ page, onChange }: { page: PageId; onChange: (page: PageId) =>
   ];
   return (
     <aside className="sidebar">
-      <div className="brand-mark" title="苜芬绘图AI"><img src={logoUrl} alt="苜芬绘图AI" /></div>
-      <span className="brand-name">苜芬绘图AI</span>
+      <div className="brand-mark" title="电商工作台"><img src={logoUrl} alt="电商工作台" /></div>
+      <span className="brand-name">电商工作台</span>
       <nav>
         {items.map((item) => {
           const Icon = item.icon;
@@ -337,6 +348,7 @@ function Topbar({
 }) {
   const meta = PAGE_META[page];
   const apiReady = settings.hasApiKey;
+  const activeService = settings.services.find((service) => service.id === settings.activeServiceId);
   return (
     <header className="topbar">
       <div className="page-title">
@@ -351,7 +363,7 @@ function Topbar({
         </div>
       )}
       <button className={apiReady ? 'api-state ready' : 'api-state'} onClick={onSettings}>
-        {settings.hasApiKey ? `${settings.invocationMode === 'async' ? '异步' : '同步'}服务已配置` : '卡密未配置'}
+        {settings.hasApiKey ? `${activeService?.name ?? '生图服务'}已配置` : 'API Key 未配置'}
       </button>
     </header>
   );
@@ -393,15 +405,6 @@ function ChipGroup({ values, value, onChange }: { values: string[]; value: strin
       ))}
     </div>
   );
-}
-
-function MultiChipGroup({ values, selected, onChange }: { values: string[]; selected: string[]; onChange: (value: string[]) => void }) {
-  const active = selected.length > 0 ? selected : [values[0]];
-  const toggle = (value: string) => {
-    const next = active.includes(value) ? active.filter((item) => item !== value) : [...active, value];
-    if (next.length > 0) onChange(values.filter((item) => next.includes(item)));
-  };
-  return <div className="chip-row multi-chip-row">{values.map((value) => <button type="button" key={value} className={active.includes(value) ? 'chip selected' : 'chip'} onClick={() => toggle(value)}>{value}</button>)}</div>;
 }
 
 function TaskCard({
@@ -560,6 +563,7 @@ function TemplateQueuePage({
   onAssets: (asset: AssetRecord) => void;
 }) {
   const [presetId, setPresetId] = useState('');
+  const availableRatios = ratioNames(snapshot.settings);
   const baseTask = draft.tasks[0] ?? createTask(1, snapshot.tagGroups[0]);
   const activeGroup = snapshot.tagGroups.find((group) => group.id === baseTask.tagGroupId) ?? snapshot.tagGroups[0];
   const activeSubcategory = activeGroup?.subcategories.find((subcategory) => subcategory.id === baseTask.tagSubcategoryId) ?? activeGroup?.subcategories[0];
@@ -762,8 +766,8 @@ function TemplateQueuePage({
         <section><h3>大分类</h3><div className="queue-setting-chips wrap">{snapshot.tagGroups.map((group) => <button type="button" key={group.id} className={activeGroup?.id === group.id ? 'selected' : ''} onClick={() => changeGroup(group)}>{group.name}</button>)}</div></section>
         <section><h3>小分类</h3><div className="queue-setting-chips wrap">{activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={activeSubcategory?.id === subcategory.id ? 'selected' : ''} onClick={() => changeSubcategory(subcategory)}>{subcategory.name}</button>)}</div></section>
         <section><h3>出图质量</h3><ChipGroup values={['1K', '2K']} value={baseTask.resolution} onChange={(value) => setOutputForAll('resolution', value)} /></section>
-        <section><h3>正面比例与数量</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.frontRatios, draft.queueOutput.frontRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatios: values, frontRatio: values[0] } })} /><div className="ratio-quantity-grid">{normalizedGenerationRatios(draft.queueOutput.frontRatios, draft.queueOutput.frontRatio).map((ratio) => <label key={ratio}><span>{ratio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'front', ratio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatioQuantities: { ...draft.queueOutput.frontRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label>)}</div></section>
-        <section><h3>侧面比例与数量</h3><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(draft.queueOutput.sideRatios, draft.queueOutput.sideRatio)} onChange={(values) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatios: values, sideRatio: values[0] } })} /><div className="ratio-quantity-grid">{normalizedGenerationRatios(draft.queueOutput.sideRatios, draft.queueOutput.sideRatio).map((ratio) => <label key={ratio}><span>{ratio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'side', ratio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatioQuantities: { ...draft.queueOutput.sideRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label>)}</div></section>
+        <section><h3>正面比例与数量</h3><select value={draft.queueOutput.frontRatio} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatio: event.target.value, frontRatios: [event.target.value] } })}>{availableRatios.map((ratio) => <option key={ratio}>{ratio}</option>)}</select><div className="ratio-quantity-grid"><label><span>{draft.queueOutput.frontRatio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'front', draft.queueOutput.frontRatio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)), frontRatioQuantities: { ...draft.queueOutput.frontRatioQuantities, [draft.queueOutput.frontRatio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label></div></section>
+        <section><h3>侧面比例与数量</h3><select value={draft.queueOutput.sideRatio} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatio: event.target.value, sideRatios: [event.target.value] } })}>{availableRatios.map((ratio) => <option key={ratio}>{ratio}</option>)}</select><div className="ratio-quantity-grid"><label><span>{draft.queueOutput.sideRatio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'side', draft.queueOutput.sideRatio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)), sideRatioQuantities: { ...draft.queueOutput.sideRatioQuantities, [draft.queueOutput.sideRatio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label></div></section>
         <section><h3>生成模型</h3><div className="queue-model-options"><button type="button" className="selected">{draft.model}</button></div><input value={draft.model} onChange={(event) => onDraft({ ...draft, model: event.target.value })} /></section>
         <section><h3>批次标签</h3><input value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></section>
         <button type="button" className="primary queue-start-button" disabled={generationBusy || readyTasks.length === 0 || missingFaceCount > 0 || total === 0} onClick={onGenerate}>{generationBusy ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{generating ? '提交中' : generationBusy ? `模板队列生成中（剩余 ${pendingCount} 张）` : `开始生成 ${total} 张`}</button>
@@ -794,7 +798,8 @@ function StudioPage({
     return <TemplateQueuePage snapshot={snapshot} draft={draft} progress={progress} generating={generating} onDraft={onDraft} onGenerate={onGenerate} onAssets={onAssets} />;
   }
   const visibleTasks = draft.mode === 'single' ? draft.tasks.slice(0, 1) : draft.tasks;
-  const outputRatios = normalizedGenerationRatios(draft.outputRatios, visibleTasks[0]?.ratio ?? '3:4');
+  const availableRatios = ratioNames(snapshot.settings);
+  const outputRatios = normalizedGenerationRatios(draft.outputRatios, visibleTasks[0]?.ratio ?? '3:4', availableRatios).slice(0, 1);
   const total = visibleTasks.reduce((sum, task) => sum + outputRatios.reduce((ratioSum, ratio) => ratioSum + taskRatioQuantity(task, ratio), 0), 0);
   const currentSource = draft.mode === 'single' ? 'single' : 'batch';
   const pendingCount = snapshot.generations.filter((record) => record.source === currentSource && record.status === 'pending').length;
@@ -804,7 +809,7 @@ function StudioPage({
   const cloneTask = (task: GenerationTask) => onDraft({ ...draft, tasks: [...draft.tasks, { ...task, id: newId(), name: `${task.name} 副本` }] });
   const removeTask = (id: string) => onDraft({ ...draft, tasks: draft.tasks.filter((task) => task.id !== id) });
   const updateAllOutput = (key: 'resolution', value: string) => onDraft({ ...draft, model: modelForResolution(draft.model, value), tasks: draft.tasks.map((task) => ({ ...task, [key]: value, model: modelForResolution(task.model || draft.model, value) })) });
-  const updateOutputRatios = (ratios: string[]) => onDraft({ ...draft, outputRatios: ratios, tasks: draft.tasks.map((task) => ({ ...task, ratio: ratios[0] ?? task.ratio })) });
+  const updateOutputRatio = (ratio: string) => onDraft({ ...draft, outputRatios: [ratio], tasks: draft.tasks.map((task) => ({ ...task, ratio })) });
   const modelPresets = Array.from(new Set([snapshot.settings.defaultModel, 'gpt-image-2-async'])).filter(Boolean);
   return (
     <div className="studio-shell">
@@ -847,8 +852,7 @@ function StudioPage({
         </div>
         <label>自定义模型<input value={draft.model} onChange={(event) => onDraft({ ...draft, model: event.target.value })} /></label>
         <div className="field-label">生图比例</div>
-        <MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={outputRatios} onChange={updateOutputRatios} />
-        <small className="multi-ratio-tip">已选 {outputRatios.length} 个比例，每个任务会分别生成全部所选比例。</small>
+        <select className="ratio-select" value={outputRatios[0]} onChange={(event) => updateOutputRatio(event.target.value)}>{availableRatios.map((ratio) => <option key={ratio}>{ratio}</option>)}</select>
         <div className="field-label output-resolution-label">输出分辨率</div>
         <ChipGroup values={['1K', '2K']} value={visibleTasks[0]?.resolution ?? '1K'} onChange={(value) => updateAllOutput('resolution', value)} />
         {draft.mode === 'batch' && <button type="button" className="secondary wide" onClick={addTask}><Plus size={16} />新增任务</button>}
@@ -973,7 +977,7 @@ function WorkbenchPage({
       return;
     }
     if (!snapshot.settings.hasApiKey) {
-      onNotice('请先配置卡密');
+      onNotice('请先配置 API Key');
       onOpenSettings();
       return;
     }
@@ -1090,7 +1094,7 @@ function WorkbenchPage({
               <textarea value={prompt} onChange={(event) => { setPrompt(event.target.value); updateWorkbenchDraft({ workbenchPrompt: event.target.value }); }} />
               <div className="node-settings">
                 <label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
-                <label>画幅<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label>
+                <label>画幅<select value={ratio} onChange={(event) => setRatio(event.target.value)}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label>
                 <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label>
               </div>
             </section>
@@ -1353,7 +1357,7 @@ function StampPage({
       return;
     }
     if (!snapshot.settings.hasApiKey) {
-      onNotice('请先配置卡密');
+      onNotice('请先配置 API Key');
       onOpenSettings();
       return;
     }
@@ -1424,7 +1428,7 @@ function StampPage({
 
         <aside className="stamp-right-panel">
           <section><h3>工艺</h3><ChipGroup values={['印刷', '刺绣', '烫印']} value={craft} onChange={(value) => setCraft(value as typeof craft)} /><label>不透明度 <b>{opacity.toFixed(2)}</b><input type="range" min="0.2" max="1" step="0.05" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label><label>工艺强度 <b>{strength.toFixed(2)}</b><input type="range" min="0" max="1" step="0.05" value={strength} onChange={(event) => setStrength(Number(event.target.value))} /></label><label>阴影 <b>{shadow.toFixed(2)}</b><input type="range" min="0" max="1" step="0.05" value={shadow} onChange={(event) => setShadow(Number(event.target.value))} /></label><label>旋转角度 <b>{placement.rotation}°</b><input type="range" min="-180" max="180" step="1" value={placement.rotation} onChange={(event) => setPlacement({ ...placement, rotation: Number(event.target.value) })} /></label></section>
-          <section><h3>输出参数</h3><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></section>
+          <section><h3>输出参数</h3><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></section>
           <section className="stamp-prompt-section"><header><h3>API 材质参考提示词</h3><button type="button" className="text-button" onClick={() => onDraft({ ...draft, stampPrompt: DEFAULT_STAMP_PROMPT })}><RefreshCw size={13} />恢复默认</button></header><textarea value={stampPrompt} onChange={(event) => onDraft({ ...draft, stampPrompt: event.target.value })} /><small>API 只处理产品材质与光影；客户 Logo 会在图片返回后按画布坐标由本地精准回贴。</small></section>
         </aside>
       </div>
@@ -1441,58 +1445,400 @@ const DETAIL_GENERATE_SECTIONS = [
   ['06', '品质保障', '展示包装、服务、品质承诺或购买理由，形成完整详情页收尾。'],
 ] as const;
 
-function DetailGeneratePage({ snapshot, onRefresh, onOpenSettings, onNotice, onAssets }: { snapshot: AppSnapshot; onRefresh: () => Promise<AppSnapshot>; onOpenSettings: () => void; onNotice: (message: string) => void; onAssets: (asset: AssetRecord) => void }) {
+function DetailGeneratePage({
+  snapshot,
+  onRefresh,
+  onOpenSettings,
+  onNotice,
+  onAssets,
+}: {
+  snapshot: AppSnapshot;
+  onRefresh: () => Promise<AppSnapshot>;
+  onOpenSettings: () => void;
+  onNotice: (message: string) => void;
+  onAssets: (asset: AssetRecord) => void;
+}) {
   const [products, setProducts] = useState<AssetRecord[]>([]);
-  const [description, setDescription] = useState('');
-  const [platform, setPlatform] = useState('淘宝/天猫');
-  const [region, setRegion] = useState('中国大陆');
-  const [language, setLanguage] = useState('中文');
-  const [style, setStyle] = useState('高级简洁');
-  const [ratio, setRatio] = useState('3:4');
-  const [audience, setAudience] = useState('');
-  const [positioning, setPositioning] = useState('');
-  const [extra, setExtra] = useState('');
+  const [description, setDescription] = useState("");
+  const [platform, setPlatform] = useState("淘宝/天猫");
+  const [region, setRegion] = useState("中国大陆");
+  const [language, setLanguage] = useState("中文");
+  const [style, setStyle] = useState("高级简洁");
+  const [ratio, setRatio] = useState("3:4");
+  const [audience, setAudience] = useState("");
+  const [positioning, setPositioning] = useState("");
+  const [extra, setExtra] = useState("");
   const [model, setModel] = useState(snapshot.settings.defaultModel);
-  const [resolution, setResolution] = useState('1K');
-  const [batchTag, setBatchTag] = useState('detail_generate');
+  const [resolution, setResolution] = useState("1K");
+  const [batchTag, setBatchTag] = useState("detail_generate");
   const [running, setRunning] = useState(false);
-  const [editingSection, setEditingSection] = useState('');
-  const [sectionPrompts, setSectionPrompts] = useState<Record<string, string>>({});
-  const sharedPromptKey = JSON.stringify([description, platform, region, language, style, audience, positioning, extra]);
+  const [editingSection, setEditingSection] = useState("");
+  const [sectionPrompts, setSectionPrompts] = useState<Record<string, string>>(
+    {},
+  );
+  const sharedPromptKey = JSON.stringify([
+    description,
+    platform,
+    region,
+    language,
+    style,
+    audience,
+    positioning,
+    extra,
+  ]);
   const previousSharedPromptKey = useRef(sharedPromptKey);
   useEffect(() => {
     if (previousSharedPromptKey.current === sharedPromptKey) return;
     previousSharedPromptKey.current = sharedPromptKey;
     setSectionPrompts({});
   }, [sharedPromptKey]);
-  const records = snapshot.generations.filter((record) => record.source === 'detail-generate');
-  const pending = records.filter((record) => record.status === 'pending').length;
-  const completedSections = DETAIL_GENERATE_SECTIONS.filter(([number]) => records.find((record) => record.taskName.startsWith(`${number} `))?.status === 'success').length;
-  const pickProducts = async () => { const assets = await window.imageStudio.pickImages(); if (assets.length === 0) return; assets.forEach(onAssets); setProducts((current) => [...current, ...assets].filter((asset, index, all) => all.findIndex((item) => item.id === asset.id) === index).slice(0, 5)); };
-  const buildBasePrompt = () => `请为电商商品生成高质量详情页图片。平台：${platform}；地区：${region}；语言：${language}；视觉风格：${style}；目标人群：${audience || '普通电商消费者'}；价格定位：${positioning || '中高端'}。\n\n产品特点与信息：${description.trim()}\n\n${extra.trim() ? `补充要求：${extra.trim()}\n\n` : ''}必须严格保持参考产品图的款式、颜色、材质、结构、比例和关键细节一致，不虚构不存在的产品功能，不改变品牌和产品身份。画面适合${platform}电商详情页，文字排版清晰可读，避免乱码、无关 Logo、水印和 AI 瑕疵。`;
-  const buildSectionPrompt = (number: string, instruction: string) => sectionPrompts[number] || `${buildBasePrompt()}\n\n本张详情模块：${instruction}`;
+  const records = snapshot.generations.filter(
+    (record) => record.source === "detail-generate",
+  );
+  const pending = records.filter(
+    (record) => record.status === "pending",
+  ).length;
+  const completedSections = DETAIL_GENERATE_SECTIONS.filter(
+    ([number]) =>
+      records.find((record) => record.taskName.startsWith(`${number} `))
+        ?.status === "success",
+  ).length;
+  const pickProducts = async () => {
+    const assets = await window.imageStudio.pickImages();
+    if (assets.length === 0) return;
+    assets.forEach(onAssets);
+    setProducts((current) =>
+      [...current, ...assets]
+        .filter(
+          (asset, index, all) =>
+            all.findIndex((item) => item.id === asset.id) === index,
+        )
+        .slice(0, 5),
+    );
+  };
+  const buildBasePrompt = () =>
+    `请为电商商品生成高质量详情页图片。平台：${platform}；地区：${region}；语言：${language}；视觉风格：${style}；目标人群：${audience || "普通电商消费者"}；价格定位：${positioning || "中高端"}。\n\n产品特点与信息：${description.trim()}\n\n${extra.trim() ? `补充要求：${extra.trim()}\n\n` : ""}必须严格保持参考产品图的款式、颜色、材质、结构、比例和关键细节一致，不虚构不存在的产品功能，不改变品牌和产品身份。画面适合${platform}电商详情页，文字排版清晰可读，避免乱码、无关 Logo、水印和 AI 瑕疵。`;
+  const buildSectionPrompt = (number: string, instruction: string) =>
+    sectionPrompts[number] ||
+    `${buildBasePrompt()}\n\n本张详情模块：${instruction}`;
   const generate = async () => {
-    if (products.length === 0) return onNotice('请先上传至少一张产品图');
-    if (!description.trim()) return onNotice('请先描述产品特点');
-    if (!snapshot.settings.hasApiKey) { onNotice('请先配置卡密'); onOpenSettings(); return; }
-    const refs = [products[0] ?? null, products[1] ?? null, products[2] ?? null];
-    const tasks: GenerationTask[] = DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => ({ id: newId(), name: `${number} ${title}`, tagGroupId: '', tagSubcategoryId: '', references: { garment: refs[0], side: refs[1], face: refs[2] }, detailAssets: products.slice(3), dimensions: {}, direction: title, category: '电商详情页生成', ratio, resolution, quantity: 1, model: modelForResolution(model, resolution), prompt: buildSectionPrompt(number, instruction) }));
+    if (products.length === 0) return onNotice("请先上传至少一张产品图");
+    if (!description.trim()) return onNotice("请先描述产品特点");
+    if (!snapshot.settings.hasApiKey) {
+      onNotice("请先配置 API Key");
+      onOpenSettings();
+      return;
+    }
+    const refs = [
+      products[0] ?? null,
+      products[1] ?? null,
+      products[2] ?? null,
+    ];
+    const tasks: GenerationTask[] = DETAIL_GENERATE_SECTIONS.map(
+      ([number, title, instruction]) => ({
+        id: newId(),
+        name: `${number} ${title}`,
+        tagGroupId: "",
+        tagSubcategoryId: "",
+        references: { garment: refs[0], side: refs[1], face: refs[2] },
+        detailAssets: products.slice(3),
+        dimensions: {},
+        direction: title,
+        category: "电商详情页生成",
+        ratio,
+        resolution,
+        quantity: 1,
+        model: modelForResolution(model, resolution),
+        prompt: buildSectionPrompt(number, instruction),
+      }),
+    );
     setRunning(true);
-    try { await window.imageStudio.startGeneration({ batchTag, model, source: 'detail-generate', tasks }); await onRefresh(); onNotice('详情页生成任务已提交，共 6 张，正在后台生成'); } catch (error) { onNotice(error instanceof Error ? error.message : '详情页生成失败'); } finally { setRunning(false); }
+    try {
+      await window.imageStudio.startGeneration({
+        batchTag,
+        model,
+        source: "detail-generate",
+        tasks,
+      });
+      await onRefresh();
+      onNotice("详情页生成任务已提交，共 6 张，正在后台生成");
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "详情页生成失败");
+    } finally {
+      setRunning(false);
+    }
   };
-  const regenerateSection = async (number: string, title: string, instruction: string) => {
-    if (products.length === 0) return onNotice('请先上传至少一张产品图');
-    if (!description.trim()) return onNotice('请先描述产品特点');
-    if (!snapshot.settings.hasApiKey) { onNotice('请先配置卡密'); onOpenSettings(); return; }
+  const regenerateSection = async (
+    number: string,
+    title: string,
+    instruction: string,
+  ) => {
+    if (products.length === 0) return onNotice("请先上传至少一张产品图");
+    if (!description.trim()) return onNotice("请先描述产品特点");
+    if (!snapshot.settings.hasApiKey) {
+      onNotice("请先配置 API Key");
+      onOpenSettings();
+      return;
+    }
     const prompt = buildSectionPrompt(number, instruction).trim();
-    if (!prompt) return onNotice('该详情模块提示词不能为空');
-    const task: GenerationTask = { id: newId(), name: `${number} ${title}`, tagGroupId: '', tagSubcategoryId: '', references: { garment: products[0] ?? null, side: products[1] ?? null, face: products[2] ?? null }, detailAssets: products.slice(3), dimensions: {}, direction: title, category: '电商详情页生成', ratio, resolution, quantity: 1, model: modelForResolution(model, resolution), prompt };
-    try { await window.imageStudio.startGeneration({ batchTag: `${batchTag}-${number}`, model, source: 'detail-generate', tasks: [task] }); await onRefresh(); onNotice(`${number} ${title} 已重新提交`); } catch (error) { onNotice(error instanceof Error ? error.message : '重新生成失败'); }
+    if (!prompt) return onNotice("该详情模块提示词不能为空");
+    const task: GenerationTask = {
+      id: newId(),
+      name: `${number} ${title}`,
+      tagGroupId: "",
+      tagSubcategoryId: "",
+      references: {
+        garment: products[0] ?? null,
+        side: products[1] ?? null,
+        face: products[2] ?? null,
+      },
+      detailAssets: products.slice(3),
+      dimensions: {},
+      direction: title,
+      category: "电商详情页生成",
+      ratio,
+      resolution,
+      quantity: 1,
+      model: modelForResolution(model, resolution),
+      prompt,
+    };
+    try {
+      await window.imageStudio.startGeneration({
+        batchTag: `${batchTag}-${number}`,
+        model,
+        source: "detail-generate",
+        tasks: [task],
+      });
+      await onRefresh();
+      onNotice(`${number} ${title} 已重新提交`);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "重新生成失败");
+    }
   };
-  return <div className="detail-generate-page"><section className="detail-generate-toolbar"><div><h2>详情页生成</h2><p>上传产品素材并描述特点，自动生成一套完整的电商详情页模块图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || pending > 0} onClick={generate}>{running || pending > 0 ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{pending > 0 ? `生成中 ${pending}/6` : '生成 6 张详情图'}</button></section><div className="detail-generate-layout"><main className="detail-generate-form"><section className="detail-generate-card"><header><h3>商品图 / 产品素材</h3><span>{products.length}/5</span></header><div className="product-asset-picker">{products.map((asset) => <div key={asset.id}><LocalImage asset={asset} alt={asset.name} /><button type="button" onClick={() => setProducts((current) => current.filter((item) => item.id !== asset.id))}><X size={13} /></button></div>)}<button type="button" className="product-add-button" onClick={pickProducts}><Plus size={22} /><span>添加产品图</span></button></div><small>可上传产品白底图、细节图、模特图或场景参考图，最多 5 张。</small></section><section className="detail-generate-card"><header><h3>产品信息与生成设置</h3></header><div className="detail-generate-fields"><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="输入商品信息、卖点、参数，例如：多场景可移动音箱，20W 功率，Hi-Res 双金标..." /><div className="detail-select-grid"><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option>淘宝/天猫</option><option>京东</option><option>拼多多</option><option>独立站</option></select><select value={region} onChange={(event) => setRegion(event.target.value)}><option>中国大陆</option><option>中国港澳台</option><option>北美</option><option>欧洲</option></select><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>中文</option><option>英文</option><option>中英双语</option></select><select value={style} onChange={(event) => setStyle(event.target.value)}><option>高级简洁</option><option>温暖生活方式</option><option>科技专业</option><option>轻奢质感</option></select></div><div className="detail-ratio-options"><span>图片比例</span>{['1:1', '3:4', '9:16'].map((value) => <button type="button" key={value} className={ratio === value ? 'selected' : ''} onClick={() => setRatio(value)}>{value}</button>)}</div><input value={audience} onChange={(event) => setAudience(event.target.value)} placeholder="目标人群，例如：宝妈、上班族、送礼人群" /><input value={positioning} onChange={(event) => setPositioning(event.target.value)} placeholder="价格定位，例如：中高端、性价比、礼盒款" /><input value={extra} onChange={(event) => setExtra(event.target.value)} placeholder="补充要求，例如：突出材质、参考图同款风格、强调售后服务" /><label className="detail-sync-check"><input type="checkbox" defaultChecked />一键同步参考图模式</label></div></section></main><aside className="detail-generate-results"><header><div><h3>详情页结果</h3><span>{completedSections}/6 已完成</span></div><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={14} />打开目录</button></header><div className="detail-result-grid">{DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => { const taskRecords = records.filter((record) => record.taskName.startsWith(`${number} `)); const latestRecord = taskRecords[0]; const promptValue = sectionPrompts[number] ?? `${buildBasePrompt()}\n\n本张详情模块：${instruction}`; return <section key={number} className="detail-result-card"><header><strong>{number} {title}</strong><div className="detail-result-actions"><button type="button" onClick={() => setEditingSection((current) => current === number ? '' : number)}>{editingSection === number ? '收起' : '编辑提示词'}</button><button type="button" disabled={latestRecord?.status === 'pending'} onClick={() => regenerateSection(number, title, instruction)}><RefreshCw size={12} />重新生成</button><span>{latestRecord?.status === 'success' ? '完成' : latestRecord?.status === 'pending' ? '生成中' : '等待'}</span></div></header>{editingSection === number && <textarea className="detail-section-prompt" value={promptValue} onChange={(event) => setSectionPrompts((current) => ({ ...current, [number]: event.target.value }))} />}<TaskResults records={taskRecords.slice(0, 1)} /></section>; })}</div></aside></div></div>;
+  return (
+    <div className="detail-generate-page">
+      <section className="detail-generate-toolbar">
+        <div>
+          <h2>详情页生成</h2>
+          <p>上传产品素材并描述特点，自动生成一套完整的电商详情页模块图。</p>
+        </div>
+        <label>
+          批次前缀
+          <input
+            value={batchTag}
+            onChange={(event) => setBatchTag(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          className="primary"
+          disabled={running || pending > 0}
+          onClick={generate}
+        >
+          {running || pending > 0 ? (
+            <LoaderCircle size={16} className="spin" />
+          ) : (
+            <Sparkles size={16} />
+          )}
+          {pending > 0 ? `生成中 ${pending}/6` : "生成 6 张详情图"}
+        </button>
+      </section>
+      <div className="detail-generate-layout">
+        <main className="detail-generate-form">
+          <section className="detail-generate-card">
+            <header>
+              <h3>商品图 / 产品素材</h3>
+              <span>{products.length}/5</span>
+            </header>
+            <div className="product-asset-picker">
+              {products.map((asset) => (
+                <div key={asset.id}>
+                  <LocalImage asset={asset} alt={asset.name} />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setProducts((current) =>
+                        current.filter((item) => item.id !== asset.id),
+                      )
+                    }
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="product-add-button"
+                onClick={pickProducts}
+              >
+                <Plus size={22} />
+                <span>添加产品图</span>
+              </button>
+            </div>
+            <small>
+              可上传产品白底图、细节图、模特图或场景参考图，最多 5 张。
+            </small>
+          </section>
+          <section className="detail-generate-card">
+            <header>
+              <h3>产品信息与生成设置</h3>
+            </header>
+            <div className="detail-generate-fields">
+              <textarea
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder="输入商品信息、卖点、参数，例如：多场景可移动音箱，20W 功率，Hi-Res 双金标..."
+              />
+              <div className="detail-select-grid">
+                <select
+                  value={platform}
+                  onChange={(event) => setPlatform(event.target.value)}
+                >
+                  <option>淘宝/天猫</option>
+                  <option>京东</option>
+                  <option>拼多多</option>
+                  <option>独立站</option>
+                </select>
+                <select
+                  value={region}
+                  onChange={(event) => setRegion(event.target.value)}
+                >
+                  <option>中国大陆</option>
+                  <option>中国港澳台</option>
+                  <option>北美</option>
+                  <option>欧洲</option>
+                </select>
+                <select
+                  value={language}
+                  onChange={(event) => setLanguage(event.target.value)}
+                >
+                  <option>中文</option>
+                  <option>英文</option>
+                  <option>中英双语</option>
+                </select>
+                <select
+                  value={style}
+                  onChange={(event) => setStyle(event.target.value)}
+                >
+                  <option>高级简洁</option>
+                  <option>温暖生活方式</option>
+                  <option>科技专业</option>
+                  <option>轻奢质感</option>
+                </select>
+              </div>
+              <label className="detail-ratio-select">
+                图片比例
+                <select value={ratio} onChange={(event) => setRatio(event.target.value)}>
+                  {ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}
+                </select>
+              </label>
+              <input
+                value={audience}
+                onChange={(event) => setAudience(event.target.value)}
+                placeholder="目标人群，例如：宝妈、上班族、送礼人群"
+              />
+              <input
+                value={positioning}
+                onChange={(event) => setPositioning(event.target.value)}
+                placeholder="价格定位，例如：中高端、性价比、礼盒款"
+              />
+              <input
+                value={extra}
+                onChange={(event) => setExtra(event.target.value)}
+                placeholder="补充要求，例如：突出材质、参考图同款风格、强调售后服务"
+              />
+              <label className="detail-sync-check">
+                <input type="checkbox" defaultChecked />
+                一键同步参考图模式
+              </label>
+            </div>
+          </section>
+        </main>
+        <aside className="detail-generate-results">
+          <header>
+            <div>
+              <h3>详情页结果</h3>
+              <span>{completedSections}/6 已完成</span>
+            </div>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => window.imageStudio.openOutputDirectory()}
+            >
+              <FolderOpen size={14} />
+              打开目录
+            </button>
+          </header>
+          <div className="detail-result-grid">
+            {DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => {
+              const taskRecords = records.filter((record) =>
+                record.taskName.startsWith(`${number} `),
+              );
+              const latestRecord = taskRecords[0];
+              const promptValue =
+                sectionPrompts[number] ??
+                `${buildBasePrompt()}\n\n本张详情模块：${instruction}`;
+              return (
+                <section key={number} className="detail-result-card">
+                  <header>
+                    <strong>
+                      {number} {title}
+                    </strong>
+                    <div className="detail-result-actions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingSection((current) =>
+                            current === number ? "" : number,
+                          )
+                        }
+                      >
+                        {editingSection === number ? "收起" : "编辑提示词"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={latestRecord?.status === "pending"}
+                        onClick={() =>
+                          regenerateSection(number, title, instruction)
+                        }
+                      >
+                        <RefreshCw size={12} />
+                        重新生成
+                      </button>
+                      <span>
+                        {latestRecord?.status === "success"
+                          ? "完成"
+                          : latestRecord?.status === "pending"
+                            ? "生成中"
+                            : "等待"}
+                      </span>
+                    </div>
+                  </header>
+                  {editingSection === number && (
+                    <textarea
+                      className="detail-section-prompt"
+                      value={promptValue}
+                      onChange={(event) =>
+                        setSectionPrompts((current) => ({
+                          ...current,
+                          [number]: event.target.value,
+                        }))
+                      }
+                    />
+                  )}
+                  <TaskResults records={taskRecords.slice(0, 1)} />
+                </section>
+              );
+            })}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
 }
 
-const DEFAULT_3D_PROMPT = '100%还原服装细节和颜色，居中构图，正面视角。纯白色背景，专业摄影棚灯光，柔和阴影，干净的产品摄影风格，高端电商服饰展示。立体衣身结构清晰自然，面料纹理、厚薄、缝线、包边和装饰细节准确，高清纹理渲染，写实效果。不要模特、衣架、文字、Logo、水印和多余道具。';
+const DEFAULT_3D_PROMPT =
+  "100%还原服装细节和颜色，居中构图，正面视角。纯白色背景，专业摄影棚灯光，柔和阴影，干净的产品摄影风格，高端电商服饰展示。立体衣身结构清晰自然，面料纹理、厚薄、缝线、包边和装饰细节准确，高清纹理渲染，写实效果。不要模特、衣架、文字、Logo、水印和多余道具。";
 
 function Garment3DPage({
   snapshot,
@@ -1529,7 +1875,7 @@ function Garment3DPage({
       return;
     }
     if (!snapshot.settings.hasApiKey) {
-      onNotice('请先配置卡密');
+      onNotice('请先配置 API Key');
       onOpenSettings();
       return;
     }
@@ -1566,7 +1912,7 @@ function Garment3DPage({
       <section className="tool-intro-card"><div><h2>3D服装白底图</h2><p>将服装参考图生成正面、居中的立体商品展示图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || !garment} onClick={generate}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `生成 ${quantity} 张`}</button></section>
       <div className="garment3d-workspace">
         <section className="garment3d-reference"><header><h3>服装参考图</h3><p>上传正面服装图，模型只使用这张图还原颜色、版型、纹理和细节。</p></header><button type="button" className={garment ? 'garment3d-upload filled' : 'garment3d-upload'} onClick={pick}>{garment ? <LocalImage asset={garment} alt="3D服装参考图" /> : <><Plus size={28} /><span>上传服装图</span></>}</button>{garment && <button type="button" className="text-button danger-text" onClick={() => setGarment(null)}><Trash2 size={14} />移除图片</button>}</section>
-        <section className="garment3d-settings"><header><h3>输出设置</h3></header><div className="garment3d-summary"><span>构图</span><strong>正面 · 居中 · 纯白背景</strong></div><div className="garment3d-summary"><span>分辨率</span><strong>{resolution} · {ratio}</strong></div><div className="garment3d-controls"><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option>1:1</option><option>3:4</option><option>9:16</option></select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></div><label className="garment3d-prompt"><strong>提示词</strong><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label></section>
+        <section className="garment3d-settings"><header><h3>输出设置</h3></header><div className="garment3d-summary"><span>构图</span><strong>正面 · 居中 · 纯白背景</strong></div><div className="garment3d-summary"><span>分辨率</span><strong>{resolution} · {ratio}</strong></div><div className="garment3d-controls"><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></div><label className="garment3d-prompt"><strong>提示词</strong><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label></section>
       </div>
       <section className="standalone-result garment3d-result"><header><h3>生成结果</h3>{displayedRecord && <span>{displayedRecord.batchPrefix}</span>}</header>{displayedRecord?.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord?.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={() => setPreviewRecord(displayedRecord)}><Maximize2 size={16} /></button></div> : <div className="standalone-result-empty"><ImagePlus size={24} /><span>上传服装图并确认提示词后开始生成</span></div>}</section>
       {previewRecord && <ImagePreviewModal record={previewRecord} onClose={() => setPreviewRecord(null)} />}
@@ -1646,7 +1992,7 @@ function DetailPage({
       return;
     }
     if (!snapshot.settings.hasApiKey) {
-      onNotice('请先配置卡密');
+      onNotice('请先配置 API Key');
       onOpenSettings();
       return;
     }
@@ -1704,7 +2050,7 @@ function DetailPage({
                   <UploadSlot label="详情图" required asset={task.references.garment} onPick={() => pickReference(task.id)} onRemove={() => updateTask(task.id, (item) => ({ ...item, references: { ...item.references, garment: null } }))} />
                   <label>清晰度<select value={task.resolution} onChange={(event) => updateTask(task.id, (item) => ({ ...item, resolution: event.target.value, model: modelForResolution(item.model || draft.model, event.target.value) }))}><option>1K</option><option>2K</option></select></label>
                   <label>生成数量<input type="number" min="1" value={task.quantity} onChange={(event) => updateTask(task.id, (item) => ({ ...item, quantity: Math.max(1, Math.floor(Number(event.target.value) || 1)) }))} /></label>
-                  <label>生图比例<select value={task.ratio} onChange={(event) => updateTask(task.id, (item) => ({ ...item, ratio: event.target.value }))}><option>1:1</option><option>3:4</option><option>9:16</option></select></label>
+                  <label>生图比例<select value={task.ratio} onChange={(event) => updateTask(task.id, (item) => ({ ...item, ratio: event.target.value }))}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label>
                   <div className="detail-assets"><button type="button" className="secondary" onClick={() => addDetailAssets(task.id)}><Plus size={14} />添加细节图</button><small>{task.detailAssets?.length ?? 0}/6</small><div>{task.detailAssets?.map((asset) => <span key={asset.id}><LocalImage asset={asset} alt="细节参考图" /><button type="button" onClick={() => updateTask(task.id, (item) => ({ ...item, detailAssets: item.detailAssets?.filter((entry) => entry.id !== asset.id) }))}><X size={11} /></button></span>)}</div></div>
                 </section>
                 <section className="detail-prompt-column">
@@ -1815,7 +2161,7 @@ function TemplatesPage({
       </section>
       {creating && <section className="preset-editor">
         <div className="preset-editor-top">
-          <label>预设名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：芭蕾正侧面商拍" /></label>
+          <label>预设名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：服饰正侧面商拍" /></label>
           <label>大分类<select value={group?.id ?? ''} onChange={(event) => changeGroup(event.target.value)}>{snapshot.tagGroups.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
           <label>小分类<select value={subcategory?.id ?? ''} onChange={(event) => changeSubcategory(event.target.value)}>{group?.subcategories.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
           <label>批次标签<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label>
@@ -1830,10 +2176,10 @@ function TemplatesPage({
             <div className="preset-parameter-grid">
               <label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
               <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label>
-              <div className="preset-ratio-field"><span>正面比例</span><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(queueOutput.frontRatios, queueOutput.frontRatio)} onChange={(values) => setQueueOutput({ ...queueOutput, frontRatios: values, frontRatio: values[0] })} /></div>
-              <div className="ratio-quantity-grid">{normalizedGenerationRatios(queueOutput.frontRatios, queueOutput.frontRatio).map((ratio) => <label key={ratio}>{ratio} 数量<input type="number" min="0" value={queueRatioQuantity(queueOutput, 'front', ratio)} onChange={(event) => setQueueOutput({ ...queueOutput, frontRatioQuantities: { ...queueOutput.frontRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } })} /></label>)}</div>
-              <div className="preset-ratio-field"><span>侧面比例</span><MultiChipGroup values={SUPPORTED_ASPECT_RATIOS} selected={normalizedGenerationRatios(queueOutput.sideRatios, queueOutput.sideRatio)} onChange={(values) => setQueueOutput({ ...queueOutput, sideRatios: values, sideRatio: values[0] })} /></div>
-              <div className="ratio-quantity-grid">{normalizedGenerationRatios(queueOutput.sideRatios, queueOutput.sideRatio).map((ratio) => <label key={ratio}>{ratio} 数量<input type="number" min="0" value={queueRatioQuantity(queueOutput, 'side', ratio)} onChange={(event) => setQueueOutput({ ...queueOutput, sideRatioQuantities: { ...queueOutput.sideRatioQuantities, [ratio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } })} /></label>)}</div>
+              <label>正面比例<select value={queueOutput.frontRatio} onChange={(event) => setQueueOutput({ ...queueOutput, frontRatio: event.target.value, frontRatios: [event.target.value] })}>{ratioNames(snapshot.settings).map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
+              <label>正面数量<input type="number" min="0" value={queueRatioQuantity(queueOutput, 'front', queueOutput.frontRatio)} onChange={(event) => setQueueOutput({ ...queueOutput, frontQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)), frontRatioQuantities: { ...queueOutput.frontRatioQuantities, [queueOutput.frontRatio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } })} /></label>
+              <label>侧面比例<select value={queueOutput.sideRatio} onChange={(event) => setQueueOutput({ ...queueOutput, sideRatio: event.target.value, sideRatios: [event.target.value] })}>{ratioNames(snapshot.settings).map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
+              <label>侧面数量<input type="number" min="0" value={queueRatioQuantity(queueOutput, 'side', queueOutput.sideRatio)} onChange={(event) => setQueueOutput({ ...queueOutput, sideQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)), sideRatioQuantities: { ...queueOutput.sideRatioQuantities, [queueOutput.sideRatio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } })} /></label>
             </div>
           </section>
         </div>
@@ -2190,53 +2536,108 @@ function SettingsPage({
   configFile: string;
   onSaved: (settings: PublicSettings) => void;
 }) {
-  const [form, setForm] = useState({ ...settings, apiKey: '' });
+  const [form, setForm] = useState<SettingsInput>(() => ({
+    defaultModel: settings.defaultModel,
+    invocationMode: settings.invocationMode,
+    activeServiceId: settings.activeServiceId,
+    services: settings.services.map((service) => ({ ...service, apiKey: '' })),
+    imageRatios: settings.imageRatios.map((preset) => ({ ...preset })),
+  }));
   const [saving, setSaving] = useState(false);
-  const [settingsUnlocked, setSettingsUnlocked] = useState(false);
-  const [accessPassword, setAccessPassword] = useState('');
-  const [accessError, setAccessError] = useState('');
-  const unlockSettings = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (accessPassword === SETTINGS_ACCESS_PASSWORD) {
-      setSettingsUnlocked(true);
-      setAccessError('');
-      return;
-    }
-    setAccessError('密码错误，请重新输入');
-    setAccessPassword('');
+  const [formError, setFormError] = useState('');
+  const updateService = (id: string, update: Partial<SettingsInput['services'][number]>) => {
+    setForm((current) => ({ ...current, services: current.services.map((service) => service.id === id ? { ...service, ...update } : service) }));
+  };
+  const addService = () => {
+    const id = newId();
+    setForm((current) => ({
+      ...current,
+      activeServiceId: id,
+      services: [...current.services, { id, name: `生图服务 ${current.services.length + 1}`, baseUrl: '', apiKey: '' }],
+    }));
+  };
+  const removeService = (id: string) => {
+    setForm((current) => {
+      if (current.services.length <= 1) return current;
+      const services = current.services.filter((service) => service.id !== id);
+      return { ...current, services, activeServiceId: current.activeServiceId === id ? services[0].id : current.activeServiceId };
+    });
+  };
+  const addRatio = () => {
+    setForm((current) => ({
+      ...current,
+      imageRatios: [...current.imageRatios, { id: newId(), name: '', size: '' }],
+    }));
+  };
+  const updateRatio = (id: string, update: Partial<SettingsInput['imageRatios'][number]>) => {
+    setForm((current) => ({ ...current, imageRatios: current.imageRatios.map((preset) => preset.id === id ? { ...preset, ...update } : preset) }));
+  };
+  const removeRatio = (id: string) => {
+    setForm((current) => ({ ...current, imageRatios: current.imageRatios.filter((preset) => preset.id !== id) }));
   };
   const save = async () => {
+    const invalidService = form.services.find((service) => !service.name.trim() || !/^https?:\/\//i.test(service.baseUrl.trim()));
+    if (invalidService) {
+      setFormError('请为每个生图服务填写名称，以及以 http:// 或 https:// 开头的 API 地址');
+      return;
+    }
+    const invalidRatio = form.imageRatios.find((preset) => !preset.name.trim() || !/^[1-9]\d*[x×][1-9]\d*$/i.test(preset.size.trim()));
+    if (invalidRatio || new Set(form.imageRatios.map((preset) => preset.name.trim())).size !== form.imageRatios.length) {
+      setFormError('比例名称不能重复，实际参数必须使用“宽x高”格式，例如 1280x720');
+      return;
+    }
+    setFormError('');
     setSaving(true);
     try {
-      const result = await window.imageStudio.saveSettings({
-        defaultModel: form.defaultModel,
-        invocationMode: form.invocationMode,
-        apiKey: form.apiKey,
-      });
+      const result = await window.imageStudio.saveSettings(form);
       onSaved(result);
-      setForm((current) => ({ ...current, ...result, apiKey: '' }));
+      setForm({
+        defaultModel: result.defaultModel,
+        invocationMode: result.invocationMode,
+        activeServiceId: result.activeServiceId,
+        services: result.services.map((service) => ({ ...service, apiKey: '' })),
+        imageRatios: result.imageRatios.map((preset) => ({ ...preset })),
+      });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : '设置保存失败');
     } finally {
       setSaving(false);
     }
   };
-  if (!settingsUnlocked) {
-    return <div className="settings-lock-page"><form className="settings-lock-card" onSubmit={unlockSettings}>
-      <div className="settings-lock-icon"><LockKeyhole size={24} /></div>
-      <h2>设置已锁定</h2>
-      <p>输入设置密码后查看和修改卡密及工作目录。</p>
-      <label>设置密码<input type="password" autoFocus autoComplete="current-password" value={accessPassword} onChange={(event) => { setAccessPassword(event.target.value); setAccessError(''); }} placeholder="请输入密码" /></label>
-      {accessError && <div className="settings-lock-error">{accessError}</div>}
-      <button type="submit" className="primary" disabled={!accessPassword}>进入设置</button>
-    </form></div>;
-  }
   return (
     <div className="settings-page">
       <section className="settings-section">
-        <div className="settings-heading"><div className="settings-icon"><Settings size={18} /></div><div><h2>生图服务</h2><p>卡密只保存在当前电脑</p></div></div>
+        <div className="settings-heading"><div className="settings-icon"><Settings size={18} /></div><div><h2>生图服务</h2><p>可添加多个 API 中转商并随时切换，密钥只保存在当前电脑</p></div></div>
         <div className="settings-form">
-          <label>卡密<input type="password" autoComplete="off" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder={form.hasApiKey ? '已安全保存，留空则不修改' : '输入卡密'} /></label>
+          <label>当前使用服务<select value={form.activeServiceId} onChange={(event) => setForm({ ...form, activeServiceId: event.target.value })}>{form.services.map((service) => <option key={service.id} value={service.id}>{service.name || '未命名服务'}</option>)}</select></label>
           <label>调用模式<select value={form.invocationMode} onChange={(event) => setForm({ ...form, invocationMode: event.target.value as PublicSettings['invocationMode'] })}><option value="async">异步模式（默认）</option><option value="sync">同步模式</option></select></label>
           <label>默认模型<input value={form.defaultModel} onChange={(event) => setForm({ ...form, defaultModel: event.target.value })} /></label>
+          <div className="service-list">
+            {form.services.map((service, index) => {
+              const saved = settings.services.find((item) => item.id === service.id);
+              return <article key={service.id} className={form.activeServiceId === service.id ? 'service-card active' : 'service-card'}>
+                <header><strong>{service.name || `生图服务 ${index + 1}`}</strong><div><button type="button" className="text-button" onClick={() => setForm({ ...form, activeServiceId: service.id })}>{form.activeServiceId === service.id ? '当前使用' : '设为当前'}</button><button type="button" className="icon-button" title="删除服务" disabled={form.services.length <= 1} onClick={() => removeService(service.id)}><Trash2 size={14} /></button></div></header>
+                <label>服务名称<input value={service.name} onChange={(event) => updateService(service.id, { name: event.target.value })} placeholder="例如：公司中转服务" /></label>
+                <label>API 地址<input value={service.baseUrl} onChange={(event) => updateService(service.id, { baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
+                <label>API Key<input type="password" autoComplete="off" value={service.apiKey ?? ''} onChange={(event) => updateService(service.id, { apiKey: event.target.value })} placeholder={saved?.hasApiKey ? '已安全保存，留空则不修改' : '输入 API Key'} /></label>
+              </article>;
+            })}
+          </div>
+          <button type="button" className="secondary add-setting-item" onClick={addService}><Plus size={15} />添加生图服务</button>
+        </div>
+      </section>
+      <section className="settings-section">
+        <div className="settings-heading"><div className="settings-icon"><Maximize2 size={18} /></div><div><h2>生图比例</h2><p>名称用于界面显示，实际参数会作为 API 请求的 size 发送</p></div></div>
+        <div className="settings-form">
+          <div className="ratio-preset-list">
+            {form.imageRatios.map((preset, index) => <article key={preset.id} className="ratio-preset-row">
+              <label>显示名称<input value={preset.name} disabled={index < 3} onChange={(event) => updateRatio(preset.id, { name: event.target.value })} placeholder="例如 16:9" /></label>
+              <label>实际参数<input value={preset.size} disabled={index < 3} onChange={(event) => updateRatio(preset.id, { size: event.target.value })} placeholder="例如 1280x720" /></label>
+              <button type="button" className="icon-button" title={index < 3 ? '内置比例不可删除' : '删除比例'} disabled={index < 3} onClick={() => removeRatio(preset.id)}><Trash2 size={14} /></button>
+            </article>)}
+          </div>
+          <button type="button" className="secondary add-setting-item" onClick={addRatio}><Plus size={15} />添加生图比例</button>
+          {formError && <div className="settings-form-error"><CircleAlert size={15} />{formError}</div>}
           <button type="button" className="primary save-settings" onClick={save} disabled={saving}><Save size={16} />{saving ? '保存中' : '保存设置'}</button>
         </div>
       </section>
@@ -2347,7 +2748,7 @@ export default function App() {
   const generate = async () => {
     if (!snapshot.settings.hasApiKey) {
       setPage('settings');
-      setNotice('请先配置卡密');
+      setNotice('请先配置 API Key');
       return;
     }
     if (visibleTasks.length === 0) {

@@ -2,7 +2,7 @@
   "name": "pixel-forge-studio",
   "version": "0.1.0",
   "private": true,
-  "description": "苜芬绘图AI - 本地优先的批量生图工作台",
+  "description": "电商工作台 - 通用电商图片生成与资产管理工具",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "npm run build:electron && concurrently --raw -k \"node scripts/dev-server.mjs\" \"tsc -p tsconfig.electron.json --watch --preserveWatchOutput\" \"wait-on http-get://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node scripts/run-electron.mjs\"",
@@ -31,8 +31,8 @@
     "wait-on": "9.0.10"
   },
   "build": {
-    "appId": "com.mufen.imageai",
-    "productName": "苜芬绘图AI",
+    "appId": "com.ecommerce.workbench",
+    "productName": "电商工作台",
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "release"
@@ -52,7 +52,7 @@
           "arch": ["x64"]
         }
       ],
-      "artifactName": "Mufen-Image-AI-Setup-${version}.${ext}"
+      "artifactName": "Ecommerce-Workbench-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,

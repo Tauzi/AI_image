@@ -5,6 +5,7 @@ import type {
   GenerationProgress,
   PromptTemplate,
   PublicSettings,
+  SettingsInput,
   TagGroup,
 } from './types';
 
@@ -14,9 +15,7 @@ declare global {
   interface Window {
     imageStudio: {
       getSnapshot: () => Promise<AppSnapshot>;
-      saveSettings: (
-        settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string },
-      ) => Promise<PublicSettings>;
+      saveSettings: (settings: SettingsInput) => Promise<PublicSettings>;
       saveDraft: (draft: DraftState) => Promise<void>;
       saveTemplates: (templates: PromptTemplate[]) => Promise<void>;
       saveTags: (groups: TagGroup[]) => Promise<void>;

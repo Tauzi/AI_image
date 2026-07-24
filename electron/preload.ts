@@ -3,14 +3,14 @@ import type {
   DraftState,
   GenerationProgress,
   PromptTemplate,
-  PublicSettings,
+  SettingsInput,
   StartGenerationRequest,
   TagGroup,
 } from './types';
 
 contextBridge.exposeInMainWorld('imageStudio', {
   getSnapshot: () => ipcRenderer.invoke('app:get-snapshot'),
-  saveSettings: (settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }) =>
+  saveSettings: (settings: SettingsInput) =>
     ipcRenderer.invoke('settings:save', settings),
   saveDraft: (draft: DraftState) => ipcRenderer.invoke('draft:save', draft),
   saveTemplates: (templates: PromptTemplate[]) => ipcRenderer.invoke('templates:save', templates),

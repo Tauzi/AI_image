@@ -8,8 +8,11 @@ import type {
   BatchRecord,
   DraftState,
   GenerationRecord,
+  ImageRatioPreset,
   PromptTemplate,
   PublicSettings,
+  SettingsInput,
+  StoredImageService,
   StoredSettings,
   StoredState,
   TagCategory,
@@ -18,6 +21,13 @@ import type {
 import { createDefaultTagGroups } from './default-tags';
 
 const DEFAULT_MODEL = 'gpt-image-2-async';
+const DEFAULT_SERVICE_ID = 'default-image-service';
+const DEFAULT_SERVICE_URL = 'https://mianyunai.com/v1';
+const DEFAULT_IMAGE_RATIOS: ImageRatioPreset[] = [
+  { id: 'ratio-square', name: '1:1', size: '1024x1024' },
+  { id: 'ratio-portrait', name: '3:4', size: '768x1024' },
+  { id: 'ratio-tall', name: '9:16', size: '576x1024' },
+];
 const LEGACY_SHARED_DIMENSIONS = ['图片类型', '展示方式', '模特类型', '动作', '核心卖点', '适用场景', '背景', '视觉风格', '文案排版'];
 
 function modelForInvocation(model: string, invocationMode: StoredSettings['invocationMode']): string {
@@ -28,16 +38,54 @@ function modelForInvocation(model: string, invocationMode: StoredSettings['invoc
   return normalized;
 }
 
-type LegacyTagGroup = Partial<TagGroup> & { id?: string; name?: string; dimensions?: TagCategory[] };
-
-function migrateLegacyPromptText<T>(value: T): T {
-  if (typeof value === 'string') return value.replaceAll('8岁东亚小女孩', '专业舞蹈儿童女模特') as T;
-  if (Array.isArray(value)) return value.map((item) => migrateLegacyPromptText(item)) as T;
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, migrateLegacyPromptText(item)])) as T;
+function normalizeBaseUrl(value: string): string {
+  const normalized = value.trim().replace(/\/+$/, '');
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(`API 地址无效：${value}`);
   }
-  return value;
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('API 地址必须使用 http 或 https');
+  return normalized;
 }
+
+function normalizeImageRatios(value: unknown): ImageRatioPreset[] {
+  const custom = Array.isArray(value) ? value : [];
+  const normalized = DEFAULT_IMAGE_RATIOS.map((preset) => ({ ...preset }));
+  const names = new Set(normalized.map((preset) => preset.name));
+  for (const [index, raw] of custom.entries()) {
+    if (!raw || typeof raw !== 'object') continue;
+    const preset = raw as Partial<ImageRatioPreset>;
+    const name = preset.name?.trim();
+    const size = preset.size?.trim().toLowerCase().replace('×', 'x');
+    if (!name || !size || !/^[1-9]\d*x[1-9]\d*$/.test(size) || names.has(name)) continue;
+    normalized.push({ id: preset.id || `custom-ratio-${index + 1}`, name, size });
+    names.add(name);
+  }
+  return normalized;
+}
+
+function saveApiKey(service: StoredImageService, apiKey: string): void {
+  if (safeStorage.isEncryptionAvailable()) {
+    service.apiKeyProtected = safeStorage.encryptString(apiKey).toString('base64');
+    service.apiKeyPlain = '';
+  } else {
+    service.apiKeyPlain = apiKey;
+    service.apiKeyProtected = '';
+  }
+}
+
+function readApiKey(service: StoredImageService): string {
+  if (!service.apiKeyProtected) return service.apiKeyPlain;
+  try {
+    return safeStorage.decryptString(Buffer.from(service.apiKeyProtected, 'base64'));
+  } catch {
+    return '';
+  }
+}
+
+type LegacyTagGroup = Partial<TagGroup> & { id?: string; name?: string; dimensions?: TagCategory[] };
 
 function normalizeTagGroups(rawGroups: LegacyTagGroup[], defaults: TagGroup[]): TagGroup[] {
   return rawGroups.map((raw, groupIndex) => {
@@ -140,12 +188,19 @@ function defaultTagCategories(): TagCategory[] {
 
 function defaultState(): StoredState {
   return {
-    version: 1,
+    version: 2,
     settings: {
       defaultModel: DEFAULT_MODEL,
       invocationMode: 'async',
-      apiKeyProtected: '',
-      apiKeyPlain: '',
+      activeServiceId: DEFAULT_SERVICE_ID,
+      services: [{
+        id: DEFAULT_SERVICE_ID,
+        name: '默认生图服务',
+        baseUrl: DEFAULT_SERVICE_URL,
+        apiKeyProtected: '',
+        apiKeyPlain: '',
+      }],
+      imageRatios: DEFAULT_IMAGE_RATIOS,
     },
     assets: [],
     generations: [],
@@ -221,12 +276,42 @@ export class LocalStore {
   private load(): StoredState {
     if (!fs.existsSync(this.statePath)) return defaultState();
     try {
-      const parsed = migrateLegacyPromptText(JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as Partial<StoredState>);
+      const parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as Partial<StoredState>;
       const fallback = defaultState();
-      const tagGroups = Array.isArray(parsed.tagGroups) && parsed.tagGroups.length > 0
+      const tagGroups = parsed.version === 2 && Array.isArray(parsed.tagGroups) && parsed.tagGroups.length > 0
         ? normalizeTagGroups(parsed.tagGroups as LegacyTagGroup[], fallback.tagGroups)
         : fallback.tagGroups;
-      const settings = { ...fallback.settings, ...parsed.settings };
+      const parsedSettings = parsed.settings as Partial<StoredSettings> | undefined;
+      const legacyProtected = parsedSettings?.apiKeyProtected ?? '';
+      const legacyPlain = parsedSettings?.apiKeyPlain ?? '';
+      const parsedServices = Array.isArray(parsedSettings?.services) ? parsedSettings.services : [];
+      const services: StoredImageService[] = parsedServices.length > 0
+        ? parsedServices.map((service, index) => ({
+            id: service.id || `image-service-${index + 1}`,
+            name: service.name?.trim() || `生图服务 ${index + 1}`,
+            baseUrl: normalizeBaseUrl(service.baseUrl || DEFAULT_SERVICE_URL),
+            apiKeyProtected: service.apiKeyProtected || '',
+            apiKeyPlain: service.apiKeyPlain || '',
+          }))
+        : [{
+            id: DEFAULT_SERVICE_ID,
+            name: '默认生图服务',
+            baseUrl: DEFAULT_SERVICE_URL,
+            apiKeyProtected: legacyProtected,
+            apiKeyPlain: legacyPlain,
+          }];
+      const imageRatios = normalizeImageRatios(parsedSettings?.imageRatios);
+      const settings: StoredSettings = {
+        ...fallback.settings,
+        ...parsedSettings,
+        services,
+        imageRatios,
+        activeServiceId: services.some((service) => service.id === parsedSettings?.activeServiceId)
+          ? parsedSettings!.activeServiceId!
+          : services[0].id,
+      };
+      delete settings.apiKeyProtected;
+      delete settings.apiKeyPlain;
       delete (settings as unknown as Record<string, unknown>).concurrencyLimit;
       if (!settings.defaultModel || ['gpt-image-1', 'dall-e-3'].includes(settings.defaultModel)) settings.defaultModel = DEFAULT_MODEL;
       if (!['async', 'sync'].includes(settings.invocationMode)) settings.invocationMode = 'async';
@@ -254,8 +339,11 @@ export class LocalStore {
       if (!['single', 'batch', 'template'].includes(draft.mode)) draft.mode = 'batch';
       draft.queueOutput.frontQuantity = Number.isFinite(draft.queueOutput.frontQuantity) ? Math.max(0, Math.floor(draft.queueOutput.frontQuantity)) : 10;
       draft.queueOutput.sideQuantity = Number.isFinite(draft.queueOutput.sideQuantity) ? Math.max(0, Math.floor(draft.queueOutput.sideQuantity)) : 0;
-      if (!['1:1', '3:4'].includes(draft.queueOutput.frontRatio)) draft.queueOutput.frontRatio = '1:1';
-      if (!['1:1', '3:4'].includes(draft.queueOutput.sideRatio)) draft.queueOutput.sideRatio = '3:4';
+      if (!imageRatios.some((preset) => preset.name === draft.queueOutput.frontRatio)) draft.queueOutput.frontRatio = imageRatios[0].name;
+      if (!imageRatios.some((preset) => preset.name === draft.queueOutput.sideRatio)) draft.queueOutput.sideRatio = imageRatios[1]?.name ?? imageRatios[0].name;
+      draft.queueOutput.frontRatios = [draft.queueOutput.frontRatio];
+      draft.queueOutput.sideRatios = [draft.queueOutput.sideRatio];
+      draft.outputRatios = [imageRatios.some((preset) => preset.name === draft.outputRatios?.[0]) ? draft.outputRatios![0] : imageRatios[1]?.name ?? imageRatios[0].name];
       draft.tasks = Array.isArray(draft.tasks)
         ? draft.tasks.map((task) => {
             const group = tagGroups.find((item) => item.id === task.tagGroupId) ?? tagGroups[0];
@@ -264,7 +352,7 @@ export class LocalStore {
               ...task,
               tagGroupId: group?.id || '',
               tagSubcategoryId: subcategory?.id || '',
-              ratio: ['1:1', '3:4', '16:9'].includes(task.ratio) ? task.ratio : '3:4',
+              ratio: imageRatios.some((preset) => preset.name === task.ratio) ? task.ratio : imageRatios[0].name,
               resolution: ['1K', '2K'].includes(task.resolution) ? task.resolution : task.resolution === '2K' || task.resolution === '4K' ? '2K' : '1K',
             };
           })
@@ -272,6 +360,7 @@ export class LocalStore {
       return {
         ...fallback,
         ...parsed,
+        version: 2,
         settings,
         draft,
         assets: Array.isArray(parsed.assets) ? parsed.assets : [],
@@ -297,7 +386,17 @@ export class LocalStore {
     const settings: PublicSettings = {
       defaultModel: this.state.settings.defaultModel,
       invocationMode: this.state.settings.invocationMode,
-      hasApiKey: Boolean(this.state.settings.apiKeyProtected || this.state.settings.apiKeyPlain),
+      activeServiceId: this.state.settings.activeServiceId,
+      services: this.state.settings.services.map((service) => ({
+        id: service.id,
+        name: service.name,
+        baseUrl: service.baseUrl,
+        hasApiKey: Boolean(service.apiKeyProtected || service.apiKeyPlain),
+      })),
+      imageRatios: this.state.settings.imageRatios.map((preset) => ({ ...preset })),
+      hasApiKey: this.state.settings.services.some((service) =>
+        service.id === this.state.settings.activeServiceId && Boolean(service.apiKeyProtected || service.apiKeyPlain),
+      ),
     };
     return {
       settings,
@@ -313,37 +412,63 @@ export class LocalStore {
     };
   }
 
-  updateSettings(input: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }): PublicSettings {
+  updateSettings(input: SettingsInput): PublicSettings {
+    const existingServices = new Map(this.state.settings.services.map((service) => [service.id, service]));
+    const serviceInputs = input.services.length > 0 ? input.services : [{
+      id: DEFAULT_SERVICE_ID,
+      name: '默认生图服务',
+      baseUrl: DEFAULT_SERVICE_URL,
+      apiKey: '',
+    }];
+    const services = serviceInputs.map((service, index) => {
+      const existing = existingServices.get(service.id);
+      const next: StoredImageService = {
+        id: service.id || randomUUID(),
+        name: service.name.trim() || `生图服务 ${index + 1}`,
+        baseUrl: normalizeBaseUrl(service.baseUrl),
+        apiKeyProtected: existing?.apiKeyProtected ?? '',
+        apiKeyPlain: existing?.apiKeyPlain ?? '',
+      };
+      if (service.apiKey?.trim()) saveApiKey(next, service.apiKey.trim());
+      return next;
+    });
     const next: StoredSettings = {
       ...this.state.settings,
       defaultModel: modelForInvocation(input.defaultModel.trim() || DEFAULT_MODEL, input.invocationMode),
       invocationMode: input.invocationMode,
+      activeServiceId: services.some((service) => service.id === input.activeServiceId) ? input.activeServiceId : services[0].id,
+      services,
+      imageRatios: normalizeImageRatios(input.imageRatios),
     };
-    if (input.apiKey?.trim()) {
-      const apiKey = input.apiKey.trim();
-      if (safeStorage.isEncryptionAvailable()) {
-        next.apiKeyProtected = safeStorage.encryptString(apiKey).toString('base64');
-        next.apiKeyPlain = '';
-      } else {
-        next.apiKeyPlain = apiKey;
-        next.apiKeyProtected = '';
-      }
-    }
+    const ratioOptions = next.imageRatios.map((preset) => preset.name);
+    const normalizeRatio = (ratio: string | undefined, fallbackIndex = 0) => ratio && ratioOptions.includes(ratio)
+      ? ratio
+      : ratioOptions[fallbackIndex] ?? ratioOptions[0];
+    const normalizeQueueOutput = (output: DraftState['queueOutput']): DraftState['queueOutput'] => {
+      const frontRatio = normalizeRatio(output.frontRatio);
+      const sideRatio = normalizeRatio(output.sideRatio, 1);
+      return { ...output, frontRatio, sideRatio, frontRatios: [frontRatio], sideRatios: [sideRatio] };
+    };
     this.state.settings = next;
+    this.state.draft = {
+      ...this.state.draft,
+      tasks: this.state.draft.tasks.map((task) => ({ ...task, ratio: normalizeRatio(task.ratio, 1) })),
+      detailTasks: this.state.draft.detailTasks?.map((task) => ({ ...task, ratio: normalizeRatio(task.ratio, 1) })),
+      outputRatios: [normalizeRatio(this.state.draft.outputRatios?.[0], 1)],
+      queueOutput: normalizeQueueOutput(this.state.draft.queueOutput),
+    };
+    this.state.templates = this.state.templates.map((template) => template.queueOutput
+      ? { ...template, queueOutput: normalizeQueueOutput(template.queueOutput) }
+      : template);
     this.persist();
     return this.snapshot().settings;
   }
 
-  getSettingsForGeneration(): { settings: StoredSettings; apiKey: string } {
-    let apiKey = this.state.settings.apiKeyPlain;
-    if (this.state.settings.apiKeyProtected) {
-      try {
-        apiKey = safeStorage.decryptString(Buffer.from(this.state.settings.apiKeyProtected, 'base64'));
-      } catch {
-        apiKey = '';
-      }
-    }
-    return { settings: this.state.settings, apiKey };
+  getSettingsForGeneration(serviceId = this.state.settings.activeServiceId): { settings: StoredSettings; service: StoredImageService; apiKey: string } {
+    const service = this.state.settings.services.find((item) => item.id === serviceId)
+      ?? this.state.settings.services.find((item) => item.id === this.state.settings.activeServiceId)
+      ?? this.state.settings.services[0];
+    return { settings: this.state.settings, service, apiKey: readApiKey(service) };
   }
 
   saveDraft(draft: DraftState): void {

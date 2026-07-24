@@ -8,7 +8,7 @@ import type {
   DraftState,
   GenerationRecord,
   PromptTemplate,
-  PublicSettings,
+  SettingsInput,
   StampPostProcess,
   StartGenerationRequest,
   TagGroup,
@@ -25,7 +25,7 @@ function createWindow(): void {
     minHeight: 700,
     backgroundColor: '#f6f7fb',
     show: false,
-    title: '苜芬绘图AI',
+    title: '电商工作台',
     icon: path.join(__dirname, '..', 'build', 'icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
@@ -156,7 +156,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
   if (jobs.length === 0) throw new Error('请至少新增一个生成任务');
   if (jobs.some(({ task }) => !task.prompt.trim())) throw new Error('任务提示词不能为空');
   const batch = store.createBatch(`${batchPrefix}-${request.batchTag}`, jobs.length);
-  const { settings, apiKey } = store.getSettingsForGeneration();
+  const { settings, service, apiKey } = store.getSettingsForGeneration();
   let cursor = 0;
   const createdAt = new Date().toISOString();
   jobs.forEach((job) => store.addGeneration({
@@ -164,7 +164,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
     source: request.source, batchPrefix, status: 'pending', prompt: job.task.prompt,
     model: modelForInvocation(job.task.model || request.model || settings.defaultModel, settings.invocationMode), ratio: job.task.ratio,
     resolution: job.task.resolution, outputPath: '', error: '', durationMs: 0, attempts: 0, createdAt,
-    outputBaseName: job.outputBaseName, stampPostProcess: job.task.stampPostProcess,
+    outputBaseName: job.outputBaseName, stampPostProcess: job.task.stampPostProcess, remoteServiceId: service.id,
   }));
 
   const worker = async (): Promise<void> => {
@@ -180,6 +180,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
         const references = referenceIds.map((id) => store.getAsset(id)).filter((asset): asset is NonNullable<typeof asset> => Boolean(asset));
         const generated = await generateImage({
           settings,
+          service,
           apiKey,
           prompt: current.task.prompt,
           model: modelForInvocation(current.task.model || request.model || settings.defaultModel, settings.invocationMode),
@@ -263,12 +264,12 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
 async function resumePendingGenerations(): Promise<void> {
   const pending = store.pendingGenerations();
   if (pending.length === 0) return;
-  const { apiKey } = store.getSettingsForGeneration();
   await Promise.all(pending.map(async (record) => {
     const started = Date.now();
     try {
       if (!record.remoteTaskId || !record.remoteKind) throw new Error('旧任务未保存远程 taskId，无法自动恢复，请重新提交');
-      const generated = await resumeImageTask(record.remoteKind, record.remoteTaskId, apiKey);
+      const { service, apiKey } = store.getSettingsForGeneration(record.remoteServiceId);
+      const generated = await resumeImageTask(record.remoteKind, record.remoteTaskId, apiKey, service.baseUrl);
       let outputBytes = generated.bytes;
       let outputExtension = generated.extension;
       if (record.stampPostProcess) {
@@ -289,12 +290,12 @@ async function resumePendingGenerations(): Promise<void> {
 }
 
 app.whenReady().then(() => {
-  app.setName('苜芬绘图AI');
-  app.setAppUserModelId('com.mufen.imageai');
+  app.setName('电商工作台');
+  app.setAppUserModelId('com.ecommerce.workbench');
   Menu.setApplicationMenu(null);
   store = new LocalStore();
   ipcMain.handle('app:get-snapshot', () => store.snapshot());
-  ipcMain.handle('settings:save', (_event, settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }) =>
+  ipcMain.handle('settings:save', (_event, settings: SettingsInput) =>
     store.updateSettings(settings),
   );
   ipcMain.handle('draft:save', (_event, draft: DraftState) => store.saveDraft(draft));
