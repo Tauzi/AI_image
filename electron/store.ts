@@ -20,6 +20,14 @@ import { createDefaultTagGroups } from './default-tags';
 const DEFAULT_MODEL = 'gpt-image-2-async';
 const LEGACY_SHARED_DIMENSIONS = ['图片类型', '展示方式', '模特类型', '动作', '核心卖点', '适用场景', '背景', '视觉风格', '文案排版'];
 
+function modelForInvocation(model: string, invocationMode: StoredSettings['invocationMode']): string {
+  const normalized = model.trim();
+  if (invocationMode === 'sync') return normalized.endsWith('-async') ? normalized.slice(0, -'-async'.length) : normalized;
+  if (normalized === 'gpt-image-2') return 'gpt-image-2-async';
+  if (normalized === 'gpt-image-2-2k') return 'gpt-image-2-2k-async';
+  return normalized;
+}
+
 type LegacyTagGroup = Partial<TagGroup> & { id?: string; name?: string; dimensions?: TagCategory[] };
 
 function migrateLegacyPromptText<T>(value: T): T {
@@ -136,7 +144,6 @@ function defaultState(): StoredState {
     settings: {
       defaultModel: DEFAULT_MODEL,
       invocationMode: 'async',
-      concurrencyLimit: 10,
       apiKeyProtected: '',
       apiKeyPlain: '',
     },
@@ -220,9 +227,10 @@ export class LocalStore {
         ? normalizeTagGroups(parsed.tagGroups as LegacyTagGroup[], fallback.tagGroups)
         : fallback.tagGroups;
       const settings = { ...fallback.settings, ...parsed.settings };
+      delete (settings as unknown as Record<string, unknown>).concurrencyLimit;
       if (!settings.defaultModel || ['gpt-image-1', 'dall-e-3'].includes(settings.defaultModel)) settings.defaultModel = DEFAULT_MODEL;
       if (!['async', 'sync'].includes(settings.invocationMode)) settings.invocationMode = 'async';
-      settings.concurrencyLimit = Math.min(50, Math.max(1, Math.floor(Number(settings.concurrencyLimit) || 10)));
+      settings.defaultModel = modelForInvocation(settings.defaultModel, settings.invocationMode);
       const draft = {
         ...fallback.draft,
         ...parsed.draft,
@@ -289,7 +297,6 @@ export class LocalStore {
     const settings: PublicSettings = {
       defaultModel: this.state.settings.defaultModel,
       invocationMode: this.state.settings.invocationMode,
-      concurrencyLimit: this.state.settings.concurrencyLimit,
       hasApiKey: Boolean(this.state.settings.apiKeyProtected || this.state.settings.apiKeyPlain),
     };
     return {
@@ -309,9 +316,8 @@ export class LocalStore {
   updateSettings(input: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }): PublicSettings {
     const next: StoredSettings = {
       ...this.state.settings,
-      defaultModel: input.defaultModel.trim() || DEFAULT_MODEL,
+      defaultModel: modelForInvocation(input.defaultModel.trim() || DEFAULT_MODEL, input.invocationMode),
       invocationMode: input.invocationMode,
-      concurrencyLimit: Math.min(50, Math.max(1, Math.floor(Number(input.concurrencyLimit) || 10))),
     };
     if (input.apiKey?.trim()) {
       const apiKey = input.apiKey.trim();

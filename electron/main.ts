@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shel
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateImage, resumeImageTask } from './image-api';
+import { generateImage, modelForInvocation, resumeImageTask } from './image-api';
 import { LocalStore } from './store';
 import type {
   DraftState,
@@ -162,7 +162,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
   jobs.forEach((job) => store.addGeneration({
     id: job.recordId, batchId: batch.id, taskId: job.task.id, taskName: job.task.name,
     source: request.source, batchPrefix, status: 'pending', prompt: job.task.prompt,
-    model: job.task.model || request.model || settings.defaultModel, ratio: job.task.ratio,
+    model: modelForInvocation(job.task.model || request.model || settings.defaultModel, settings.invocationMode), ratio: job.task.ratio,
     resolution: job.task.resolution, outputPath: '', error: '', durationMs: 0, attempts: 0, createdAt,
     outputBaseName: job.outputBaseName, stampPostProcess: job.task.stampPostProcess,
   }));
@@ -182,7 +182,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
           settings,
           apiKey,
           prompt: current.task.prompt,
-          model: current.task.model || request.model || settings.defaultModel,
+          model: modelForInvocation(current.task.model || request.model || settings.defaultModel, settings.invocationMode),
           ratio: current.task.ratio,
           resolution: current.task.resolution,
           references,
@@ -210,7 +210,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
           batchPrefix,
           status: 'success',
           prompt: current.task.prompt,
-          model: current.task.model || request.model || settings.defaultModel,
+          model: modelForInvocation(current.task.model || request.model || settings.defaultModel, settings.invocationMode),
           ratio: current.task.ratio,
           resolution: current.task.resolution,
           outputPath,
@@ -229,7 +229,7 @@ async function runBatch(request: StartGenerationRequest): Promise<{ batchId: str
           batchPrefix,
           status: 'error',
           prompt: current.task.prompt,
-          model: current.task.model || request.model || settings.defaultModel,
+          model: modelForInvocation(current.task.model || request.model || settings.defaultModel, settings.invocationMode),
           ratio: current.task.ratio,
           resolution: current.task.resolution,
           outputPath: '',
@@ -359,6 +359,33 @@ app.whenReady().then(() => {
     const removed = store.deleteImageByPath(localPath);
     if (removed) mainWindow?.webContents.send('app:data-changed');
     return removed;
+  });
+  ipcMain.handle('image:delete-many', (_event, localPaths: string[]) => {
+    let removed = 0;
+    Array.from(new Set(localPaths)).forEach((localPath) => {
+      if (store.deleteImageByPath(localPath)) removed += 1;
+    });
+    if (removed > 0) mainWindow?.webContents.send('app:data-changed');
+    return removed;
+  });
+  ipcMain.handle('image:download-many', async (_event, localPaths: string[]) => {
+    const selection = await dialog.showOpenDialog(mainWindow!, { title: '选择批量下载目录', properties: ['openDirectory', 'createDirectory'] });
+    if (selection.canceled || !selection.filePaths[0]) return { count: 0, directory: '' };
+    const directory = selection.filePaths[0];
+    let count = 0;
+    for (const sourcePath of Array.from(new Set(localPaths))) {
+      if (!fs.existsSync(sourcePath)) continue;
+      const parsed = path.parse(sourcePath);
+      let destination = path.join(directory, parsed.base);
+      let suffix = 1;
+      while (fs.existsSync(destination)) {
+        destination = path.join(directory, `${parsed.name} (${suffix})${parsed.ext}`);
+        suffix += 1;
+      }
+      fs.copyFileSync(sourcePath, destination);
+      count += 1;
+    }
+    return { count, directory };
   });
   ipcMain.handle('image:context-menu', (event, localPath: string, suggestedName: string) => {
     Menu.buildFromTemplate([

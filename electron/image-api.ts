@@ -8,47 +8,6 @@ const ASYNC_TIMEOUT_MS = 10 * 60 * 1000;
 const POLL_INTERVAL_MS = 8_000;
 const MAX_POST_ATTEMPTS = 3;
 
-interface PostWaiter {
-  limit: number;
-  resolve: () => void;
-}
-
-let activePostRequests = 0;
-const postWaiters: PostWaiter[] = [];
-
-function pumpPostQueue(): void {
-  while (postWaiters.length > 0) {
-    const next = postWaiters[0];
-    if (activePostRequests >= next.limit) return;
-    postWaiters.shift();
-    activePostRequests += 1;
-    next.resolve();
-  }
-}
-
-async function acquirePostSlot(limitValue: number): Promise<void> {
-  const limit = Math.min(50, Math.max(1, Math.floor(limitValue) || 10));
-  if (postWaiters.length === 0 && activePostRequests < limit) {
-    activePostRequests += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => postWaiters.push({ limit, resolve }));
-}
-
-function releasePostSlot(): void {
-  activePostRequests = Math.max(0, activePostRequests - 1);
-  pumpPostQueue();
-}
-
-async function withPostSlot<T>(limit: number, operation: () => Promise<T>): Promise<T> {
-  await acquirePostSlot(limit);
-  try {
-    return await operation();
-  } finally {
-    releasePostSlot();
-  }
-}
-
 interface GenerateImageInput {
   settings: StoredSettings;
   apiKey: string;
@@ -80,6 +39,12 @@ interface ApiBody {
   message?: string;
 }
 
+const API_SIZES: Record<string, string> = {
+  '1:1': '1024x1024',
+  '3:4': '768x1024',
+  '9:16': '576x1024',
+};
+
 function apiAspectRatio(value: string): string {
   const match = /^([1-9]\d*):([1-9]\d*)$/.exec(value.trim());
   if (!match) throw new Error(`非法生图比例：${value}，比例必须是正整数 W:H`);
@@ -88,7 +53,17 @@ function apiAspectRatio(value: string): string {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) throw new Error(`非法生图比例：${value}`);
   const longShortRatio = Math.max(width, height) / Math.min(width, height);
   if (longShortRatio > 3) throw new Error(`非法生图比例：${value}，长短边比例不能超过 3:1`);
-  return `${width}:${height}`;
+  const size = API_SIZES[`${width}:${height}`];
+  if (!size) throw new Error('目前仅支持 1:1、3:4 和 9:16 生图比例');
+  return size;
+}
+
+export function modelForInvocation(model: string, invocationMode: StoredSettings['invocationMode']): string {
+  const normalized = model.trim();
+  if (invocationMode === 'sync') return normalized.endsWith('-async') ? normalized.slice(0, -'-async'.length) : normalized;
+  if (normalized === 'gpt-image-2') return 'gpt-image-2-async';
+  if (normalized === 'gpt-image-2-2k') return 'gpt-image-2-2k-async';
+  return normalized;
 }
 
 function endpoint(kind: 'generations' | 'edits', taskId?: string): string {
@@ -203,21 +178,18 @@ async function postWithFixedBody(
   kind: 'generations' | 'edits',
   headers: Record<string, string>,
   body: string | Buffer,
-  concurrencyLimit: number,
   onTaskAccepted?: (kind: 'generations' | 'edits', taskId: string) => void,
 ): Promise<GeneratedImage> {
   let lastError: unknown;
   for (let attempts = 1; attempts <= MAX_POST_ATTEMPTS; attempts += 1) {
     try {
-      const responseBody = await withPostSlot(concurrencyLimit, async () => {
-        const response = await fetch(endpoint(kind), {
-          method: 'POST',
-          headers,
-          body: body as unknown as BodyInit,
-          signal: AbortSignal.timeout(60_000),
-        });
-        return readApiBody(response);
+      const response = await fetch(endpoint(kind), {
+        method: 'POST',
+        headers,
+        body: body as unknown as BodyInit,
+        signal: AbortSignal.timeout(60_000),
       });
+      const responseBody = await readApiBody(response);
       const responseStatus = responseBody.status?.toLowerCase();
       if (['failed', 'error', 'cancelled', 'canceled'].includes(responseStatus ?? '')) {
         throw new Error(errorDetail(responseBody));
@@ -238,34 +210,35 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   if (!input.apiKey) throw new Error('请先在设置中填写 API Key');
   const headers = { Authorization: `Bearer ${input.apiKey}` };
   const isAsync = input.settings.invocationMode === 'async';
-  const aspectRatio = apiAspectRatio(input.ratio);
+  const model = modelForInvocation(input.model, input.settings.invocationMode);
+  const size = apiAspectRatio(input.ratio);
   const quality = input.resolution.toUpperCase() === '2K' ? 'high' : 'medium';
 
   if (input.references.length === 0) {
     const body = JSON.stringify({
       async: isAsync,
-      model: input.model,
+      model,
       n: 1,
       prompt: input.prompt,
       quality,
-      size: aspectRatio,
+      size,
     });
-    return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.settings.concurrencyLimit, input.onTaskAccepted);
+    return postWithFixedBody('generations', { ...headers, 'Content-Type': 'application/json' }, body, input.onTaskAccepted);
   }
 
   const boundary = `----MufenImageAI${randomUUID().replace(/-/g, '')}`;
   const body = createMultipartBody(boundary, [
     ['async', String(isAsync)],
-    ['model', input.model],
+    ['model', model],
     ['prompt', input.prompt],
     ['n', '1'],
     ['quality', quality],
-    ['size', aspectRatio],
+    ['size', size],
   ], input.references);
   return postWithFixedBody('edits', {
     ...headers,
     'Content-Type': `multipart/form-data; boundary=${boundary}`,
-  }, body, input.settings.concurrencyLimit, input.onTaskAccepted);
+  }, body, input.onTaskAccepted);
 }
 
 export async function resumeImageTask(kind: 'generations' | 'edits', taskId: string, apiKey: string): Promise<GeneratedImage> {

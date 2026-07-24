@@ -5,7 +5,6 @@ export type PageId = 'studio' | 'workbench' | 'templates' | 'assets' | 'stamp' |
 export interface PublicSettings {
   defaultModel: string;
   invocationMode: InvocationMode;
-  concurrencyLimit: number;
   hasApiKey: boolean;
 }
 

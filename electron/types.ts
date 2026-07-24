@@ -4,7 +4,6 @@ export type GenerationSource = 'single' | 'batch' | 'template' | 'workbench' | '
 export interface PublicSettings {
   defaultModel: string;
   invocationMode: InvocationMode;
-  concurrencyLimit: number;
   hasApiKey: boolean;
 }
 

@@ -40,6 +40,8 @@ declare global {
       downloadImage: (localPath: string, suggestedName: string) => Promise<boolean>;
       showImageContextMenu: (localPath: string, suggestedName: string) => Promise<void>;
       reportMissingImage: (localPath: string) => Promise<boolean>;
+      deleteImages: (localPaths: string[]) => Promise<number>;
+      downloadImages: (localPaths: string[]) => Promise<{ count: number; directory: string }>;
       onGenerationProgress: (listener: (progress: GenerationProgress) => void) => () => void;
       onDataChanged: (listener: () => void) => () => void;
     };

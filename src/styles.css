@@ -2496,6 +2496,41 @@ textarea:focus {
   box-shadow: 0 8px 22px rgba(30, 76, 113, 0.08);
 }
 
+.generated-asset-card.selected {
+  border-color: #0a84ff;
+  box-shadow: 0 0 0 3px rgba(10,132,255,.18), 0 8px 22px rgba(30,76,113,.1);
+}
+
+.asset-select-check {
+  position: absolute;
+  z-index: 3;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  cursor: pointer;
+  place-items: center;
+  color: #fff;
+  border: 2px solid rgba(255,255,255,.95);
+  border-radius: 8px;
+  background: rgba(35,45,58,.38);
+  box-shadow: 0 2px 8px rgba(0,0,0,.14);
+}
+
+.asset-select-check.selected {
+  border-color: #0a84ff;
+  background: #0a84ff;
+}
+
+.asset-multi-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .generated-asset-image {
   position: relative;
   width: 100%;

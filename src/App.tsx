@@ -129,6 +129,14 @@ function modelForResolution(currentModel: string, resolution: string): string {
   return currentModel === TWO_K_IMAGE_MODEL ? DEFAULT_IMAGE_MODEL : currentModel;
 }
 
+function modelForInvocation(currentModel: string, invocationMode: PublicSettings['invocationMode']): string {
+  const normalized = currentModel.trim();
+  if (invocationMode === 'sync') return normalized.endsWith('-async') ? normalized.slice(0, -'-async'.length) : normalized;
+  if (normalized === 'gpt-image-2') return DEFAULT_IMAGE_MODEL;
+  if (normalized === 'gpt-image-2-2k') return TWO_K_IMAGE_MODEL;
+  return normalized;
+}
+
 function newId(): string {
   return crypto.randomUUID();
 }
@@ -199,7 +207,6 @@ function emptySnapshot(): AppSnapshot {
     settings: {
       defaultModel: 'gpt-image-2-async',
       invocationMode: 'async',
-      concurrencyLimit: 10,
       hasApiKey: false,
     },
     assets: [],
@@ -1451,6 +1458,13 @@ function DetailGeneratePage({ snapshot, onRefresh, onOpenSettings, onNotice, onA
   const [running, setRunning] = useState(false);
   const [editingSection, setEditingSection] = useState('');
   const [sectionPrompts, setSectionPrompts] = useState<Record<string, string>>({});
+  const sharedPromptKey = JSON.stringify([description, platform, region, language, style, audience, positioning, extra]);
+  const previousSharedPromptKey = useRef(sharedPromptKey);
+  useEffect(() => {
+    if (previousSharedPromptKey.current === sharedPromptKey) return;
+    previousSharedPromptKey.current = sharedPromptKey;
+    setSectionPrompts({});
+  }, [sharedPromptKey]);
   const records = snapshot.generations.filter((record) => record.source === 'detail-generate');
   const pending = records.filter((record) => record.status === 'pending').length;
   const completedSections = DETAIL_GENERATE_SECTIONS.filter(([number]) => records.find((record) => record.taskName.startsWith(`${number} `))?.status === 'success').length;
@@ -1463,7 +1477,6 @@ function DetailGeneratePage({ snapshot, onRefresh, onOpenSettings, onNotice, onA
     if (!snapshot.settings.hasApiKey) { onNotice('请先配置卡密'); onOpenSettings(); return; }
     const refs = [products[0] ?? null, products[1] ?? null, products[2] ?? null];
     const tasks: GenerationTask[] = DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => ({ id: newId(), name: `${number} ${title}`, tagGroupId: '', tagSubcategoryId: '', references: { garment: refs[0], side: refs[1], face: refs[2] }, detailAssets: products.slice(3), dimensions: {}, direction: title, category: '电商详情页生成', ratio, resolution, quantity: 1, model: modelForResolution(model, resolution), prompt: buildSectionPrompt(number, instruction) }));
-    setSectionPrompts(Object.fromEntries(tasks.map((task) => [task.name.slice(0, 2), task.prompt])));
     setRunning(true);
     try { await window.imageStudio.startGeneration({ batchTag, model, source: 'detail-generate', tasks }); await onRefresh(); onNotice('详情页生成任务已提交，共 6 张，正在后台生成'); } catch (error) { onNotice(error instanceof Error ? error.message : '详情页生成失败'); } finally { setRunning(false); }
   };
@@ -1476,7 +1489,7 @@ function DetailGeneratePage({ snapshot, onRefresh, onOpenSettings, onNotice, onA
     const task: GenerationTask = { id: newId(), name: `${number} ${title}`, tagGroupId: '', tagSubcategoryId: '', references: { garment: products[0] ?? null, side: products[1] ?? null, face: products[2] ?? null }, detailAssets: products.slice(3), dimensions: {}, direction: title, category: '电商详情页生成', ratio, resolution, quantity: 1, model: modelForResolution(model, resolution), prompt };
     try { await window.imageStudio.startGeneration({ batchTag: `${batchTag}-${number}`, model, source: 'detail-generate', tasks: [task] }); await onRefresh(); onNotice(`${number} ${title} 已重新提交`); } catch (error) { onNotice(error instanceof Error ? error.message : '重新生成失败'); }
   };
-  return <div className="detail-generate-page"><section className="detail-generate-toolbar"><div><h2>详情页生成</h2><p>上传产品素材并描述特点，自动生成一套完整的电商详情页模块图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || pending > 0} onClick={generate}>{running || pending > 0 ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{pending > 0 ? `生成中 ${pending}/6` : '生成 6 张详情图'}</button></section><div className="detail-generate-layout"><main className="detail-generate-form"><section className="detail-generate-card"><header><h3>商品图 / 产品素材</h3><span>{products.length}/5</span></header><div className="product-asset-picker">{products.map((asset) => <div key={asset.id}><LocalImage asset={asset} alt={asset.name} /><button type="button" onClick={() => setProducts((current) => current.filter((item) => item.id !== asset.id))}><X size={13} /></button></div>)}<button type="button" className="product-add-button" onClick={pickProducts}><Plus size={22} /><span>添加产品图</span></button></div><small>可上传产品白底图、细节图、模特图或场景参考图，最多 5 张。</small></section><section className="detail-generate-card"><header><h3>产品信息与生成设置</h3></header><div className="detail-generate-fields"><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="输入商品信息、卖点、参数，例如：多场景可移动音箱，20W 功率，Hi-Res 双金标..." /><div className="detail-select-grid"><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option>淘宝/天猫</option><option>京东</option><option>拼多多</option><option>独立站</option></select><select value={region} onChange={(event) => setRegion(event.target.value)}><option>中国大陆</option><option>中国港澳台</option><option>北美</option><option>欧洲</option></select><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>中文</option><option>英文</option><option>中英双语</option></select><select value={style} onChange={(event) => setStyle(event.target.value)}><option>高级简洁</option><option>温暖生活方式</option><option>科技专业</option><option>轻奢质感</option></select></div><div className="detail-ratio-options"><span>图片比例</span>{['1:1', '3:4', '9:16'].map((value) => <button type="button" key={value} className={ratio === value ? 'selected' : ''} onClick={() => setRatio(value)}>{value}</button>)}</div><input value={audience} onChange={(event) => setAudience(event.target.value)} placeholder="目标人群，例如：宝妈、上班族、送礼人群" /><input value={positioning} onChange={(event) => setPositioning(event.target.value)} placeholder="价格定位，例如：中高端、性价比、礼盒款" /><input value={extra} onChange={(event) => setExtra(event.target.value)} placeholder="补充要求，例如：突出材质、参考图同款风格、强调售后服务" /><label className="detail-sync-check"><input type="checkbox" defaultChecked />一键同步参考图模式</label></div></section></main><aside className="detail-generate-results"><header><div><h3>详情页结果</h3><span>{completedSections}/6 已完成</span></div><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={14} />打开目录</button></header><div className="detail-result-grid">{DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => { const taskRecords = records.filter((record) => record.taskName.startsWith(`${number} `)); const latestRecord = taskRecords[0]; const promptValue = sectionPrompts[number] ?? latestRecord?.prompt ?? buildSectionPrompt(number, instruction); return <section key={number} className="detail-result-card"><header><strong>{number} {title}</strong><div className="detail-result-actions"><button type="button" onClick={() => setEditingSection((current) => current === number ? '' : number)}>{editingSection === number ? '收起' : '编辑提示词'}</button><button type="button" disabled={latestRecord?.status === 'pending'} onClick={() => regenerateSection(number, title, instruction)}><RefreshCw size={12} />重新生成</button><span>{latestRecord?.status === 'success' ? '完成' : latestRecord?.status === 'pending' ? '生成中' : '等待'}</span></div></header>{editingSection === number && <textarea className="detail-section-prompt" value={promptValue} onChange={(event) => setSectionPrompts((current) => ({ ...current, [number]: event.target.value }))} />}<TaskResults records={taskRecords.slice(0, 1)} /></section>; })}</div></aside></div></div>;
+  return <div className="detail-generate-page"><section className="detail-generate-toolbar"><div><h2>详情页生成</h2><p>上传产品素材并描述特点，自动生成一套完整的电商详情页模块图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || pending > 0} onClick={generate}>{running || pending > 0 ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{pending > 0 ? `生成中 ${pending}/6` : '生成 6 张详情图'}</button></section><div className="detail-generate-layout"><main className="detail-generate-form"><section className="detail-generate-card"><header><h3>商品图 / 产品素材</h3><span>{products.length}/5</span></header><div className="product-asset-picker">{products.map((asset) => <div key={asset.id}><LocalImage asset={asset} alt={asset.name} /><button type="button" onClick={() => setProducts((current) => current.filter((item) => item.id !== asset.id))}><X size={13} /></button></div>)}<button type="button" className="product-add-button" onClick={pickProducts}><Plus size={22} /><span>添加产品图</span></button></div><small>可上传产品白底图、细节图、模特图或场景参考图，最多 5 张。</small></section><section className="detail-generate-card"><header><h3>产品信息与生成设置</h3></header><div className="detail-generate-fields"><textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="输入商品信息、卖点、参数，例如：多场景可移动音箱，20W 功率，Hi-Res 双金标..." /><div className="detail-select-grid"><select value={platform} onChange={(event) => setPlatform(event.target.value)}><option>淘宝/天猫</option><option>京东</option><option>拼多多</option><option>独立站</option></select><select value={region} onChange={(event) => setRegion(event.target.value)}><option>中国大陆</option><option>中国港澳台</option><option>北美</option><option>欧洲</option></select><select value={language} onChange={(event) => setLanguage(event.target.value)}><option>中文</option><option>英文</option><option>中英双语</option></select><select value={style} onChange={(event) => setStyle(event.target.value)}><option>高级简洁</option><option>温暖生活方式</option><option>科技专业</option><option>轻奢质感</option></select></div><div className="detail-ratio-options"><span>图片比例</span>{['1:1', '3:4', '9:16'].map((value) => <button type="button" key={value} className={ratio === value ? 'selected' : ''} onClick={() => setRatio(value)}>{value}</button>)}</div><input value={audience} onChange={(event) => setAudience(event.target.value)} placeholder="目标人群，例如：宝妈、上班族、送礼人群" /><input value={positioning} onChange={(event) => setPositioning(event.target.value)} placeholder="价格定位，例如：中高端、性价比、礼盒款" /><input value={extra} onChange={(event) => setExtra(event.target.value)} placeholder="补充要求，例如：突出材质、参考图同款风格、强调售后服务" /><label className="detail-sync-check"><input type="checkbox" defaultChecked />一键同步参考图模式</label></div></section></main><aside className="detail-generate-results"><header><div><h3>详情页结果</h3><span>{completedSections}/6 已完成</span></div><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={14} />打开目录</button></header><div className="detail-result-grid">{DETAIL_GENERATE_SECTIONS.map(([number, title, instruction]) => { const taskRecords = records.filter((record) => record.taskName.startsWith(`${number} `)); const latestRecord = taskRecords[0]; const promptValue = sectionPrompts[number] ?? `${buildBasePrompt()}\n\n本张详情模块：${instruction}`; return <section key={number} className="detail-result-card"><header><strong>{number} {title}</strong><div className="detail-result-actions"><button type="button" onClick={() => setEditingSection((current) => current === number ? '' : number)}>{editingSection === number ? '收起' : '编辑提示词'}</button><button type="button" disabled={latestRecord?.status === 'pending'} onClick={() => regenerateSection(number, title, instruction)}><RefreshCw size={12} />重新生成</button><span>{latestRecord?.status === 'success' ? '完成' : latestRecord?.status === 'pending' ? '生成中' : '等待'}</span></div></header>{editingSection === number && <textarea className="detail-section-prompt" value={promptValue} onChange={(event) => setSectionPrompts((current) => ({ ...current, [number]: event.target.value }))} />}<TaskResults records={taskRecords.slice(0, 1)} /></section>; })}</div></aside></div></div>;
 }
 
 const DEFAULT_3D_PROMPT = '100%还原服装细节和颜色，居中构图，正面视角。纯白色背景，专业摄影棚灯光，柔和阴影，干净的产品摄影风格，高端电商服饰展示。立体衣身结构清晰自然，面料纹理、厚薄、缝线、包边和装饰细节准确，高清纹理渲染，写实效果。不要模特、衣架、文字、Logo、水印和多余道具。';
@@ -1664,7 +1677,6 @@ function DetailPage({
       <section className="detail-toolbar">
         <div><h2>详情图区域替换</h2><p>批量上传旧详情页，在保持内容不变的前提下生成明显不同的新排版。</p></div>
         <label>批次前缀<input value={batchTag} onChange={(event) => onDraft({ ...draft, detailBatchTag: event.target.value, detailSharedPrompt: sharedPrompt, detailTasks: tasks })} /></label>
-        <span className="detail-concurrency">并发上限 {snapshot.settings.concurrencyLimit}</span>
         <button type="button" className="secondary" onClick={batchAdd}><Images size={15} />批量添加详情图</button>
         <button type="button" className="secondary" onClick={addEmpty}><Plus size={15} />新增任务</button>
         <button type="button" className="primary" disabled={running || total === 0} onClick={generate}>{running ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{running ? '提交中' : `开始生成 ${total} 张`}</button>
@@ -2012,6 +2024,9 @@ function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
   const [toDate, setToDate] = useState('');
   const [query, setQuery] = useState('');
   const [preview, setPreview] = useState<GenerationRecord | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkDownloading, setBulkDownloading] = useState(false);
   const success = useMemo(() => generations.filter((record) => record.status === 'success'), [generations]);
   const models = useMemo(() => Array.from(new Set(success.map((record) => record.model))).sort(), [success]);
   const filtered = useMemo(() => {
@@ -2051,6 +2066,34 @@ function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
   useEffect(() => {
     if (preview && !filtered.some((record) => record.id === preview.id)) setPreview(null);
   }, [filtered, preview]);
+  useEffect(() => {
+    const available = new Set(success.map((record) => record.id));
+    setSelectedIds((current) => new Set([...current].filter((id) => available.has(id))));
+  }, [success]);
+  const toggleSelected = (id: string) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const deleteSelected = async () => {
+    const selected = success.filter((record) => selectedIds.has(record.id));
+    if (selected.length === 0) return;
+    if (!window.confirm(`确定彻底删除选中的 ${selected.length} 张图片吗？\n图片文件和资产库记录都会删除，此操作无法撤销。`)) return;
+    await window.imageStudio.deleteImages(selected.map((record) => record.outputPath));
+    setSelectedIds(new Set());
+    setSelectionMode(false);
+  };
+  const downloadSelected = async () => {
+    const selected = success.filter((record) => selectedIds.has(record.id));
+    if (selected.length === 0) return;
+    setBulkDownloading(true);
+    try {
+      const result = await window.imageStudio.downloadImages(selected.map((record) => record.outputPath));
+      if (result.count > 0) window.alert(`已下载 ${result.count} 张图片到：\n${result.directory}`);
+    } finally {
+      setBulkDownloading(false);
+    }
+  };
 
   return (
     <div className="content-page">
@@ -2063,11 +2106,11 @@ function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
           <label className="asset-date-filter"><span>至</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
         </div>
       </section>
-      <div className="section-toolbar"><span>显示 {filtered.length} / {success.length} 张生成图片</span><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={15} />输出目录</button></div>
+      <div className="section-toolbar"><span>{selectionMode ? `已选择 ${selectedIds.size} 张` : `显示 ${filtered.length} / ${success.length} 张生成图片`}</span><div className="asset-multi-actions">{selectionMode && <><button type="button" className="secondary" onClick={() => setSelectedIds((current) => { const next = new Set(current); filtered.forEach((record) => next.add(record.id)); return next; })}><Check size={14} />全选当前</button><button type="button" className="secondary" onClick={() => setSelectedIds(new Set())}>清空选择</button><button type="button" className="secondary" disabled={selectedIds.size === 0 || bulkDownloading} onClick={downloadSelected}>{bulkDownloading ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}{bulkDownloading ? '下载中' : '下载选中'}</button><button type="button" className="danger-button" disabled={selectedIds.size === 0} onClick={deleteSelected}><Trash2 size={14} />删除选中</button></>}<button type="button" className={selectionMode ? 'primary' : 'secondary'} onClick={() => { setSelectionMode((value) => !value); setSelectedIds(new Set()); }}><Images size={15} />{selectionMode ? '完成多选' : '多选'}</button><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={15} />输出目录</button></div></div>
       {success.length === 0 ? <EmptyState icon={Archive} title="资产库还是空的" action="所有生图功能生成成功的图片都会自动出现在这里" /> : filtered.length === 0 ? <EmptyState icon={Search} title="没有匹配的图片" action="请调整来源、模型、日期或搜索条件" /> : (
         <div className="generated-asset-grid">
-          {filtered.map((record) => <article className="generated-asset-card" key={record.id} onDoubleClick={() => window.imageStudio.revealFile(record.outputPath)}>
-            <div className="generated-asset-image"><LocalImage path={record.outputPath} alt={record.taskName} /><span className={`batch-prefix-badge ${record.source}`}>{record.batchPrefix}</span><button type="button" className="image-expand-button" title="放大预览" onClick={(event) => { event.stopPropagation(); setPreview(record); }}><Maximize2 size={16} /></button></div>
+          {filtered.map((record) => <article className={selectedIds.has(record.id) ? 'generated-asset-card selected' : 'generated-asset-card'} key={record.id} onClick={() => selectionMode && toggleSelected(record.id)} onDoubleClick={() => !selectionMode && window.imageStudio.revealFile(record.outputPath)}>
+            <div className="generated-asset-image"><LocalImage path={record.outputPath} alt={record.taskName} />{selectionMode && <button type="button" className={selectedIds.has(record.id) ? 'asset-select-check selected' : 'asset-select-check'} onClick={(event) => { event.stopPropagation(); toggleSelected(record.id); }}>{selectedIds.has(record.id) ? <Check size={16} /> : null}</button>}<span className={`batch-prefix-badge ${record.source}`}>{record.batchPrefix}</span>{!selectionMode && <button type="button" className="image-expand-button" title="放大预览" onClick={(event) => { event.stopPropagation(); setPreview(record); }}><Maximize2 size={16} /></button>}</div>
             <div className="generated-asset-info"><h3 title={record.taskName}>{record.taskName}</h3><p>{record.model} · {record.ratio} · {record.resolution}</p><small>{formatDate(record.createdAt)}</small></div>
           </article>)}
         </div>
@@ -2168,7 +2211,6 @@ function SettingsPage({
       const result = await window.imageStudio.saveSettings({
         defaultModel: form.defaultModel,
         invocationMode: form.invocationMode,
-        concurrencyLimit: form.concurrencyLimit,
         apiKey: form.apiKey,
       });
       onSaved(result);
@@ -2194,7 +2236,6 @@ function SettingsPage({
         <div className="settings-form">
           <label>卡密<input type="password" autoComplete="off" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder={form.hasApiKey ? '已安全保存，留空则不修改' : '输入卡密'} /></label>
           <label>调用模式<select value={form.invocationMode} onChange={(event) => setForm({ ...form, invocationMode: event.target.value as PublicSettings['invocationMode'] })}><option value="async">异步模式（默认）</option><option value="sync">同步模式</option></select></label>
-          <label>最大并发数<input type="number" min="1" max="50" value={form.concurrencyLimit} onChange={(event) => setForm({ ...form, concurrencyLimit: Math.min(50, Math.max(1, Math.floor(Number(event.target.value) || 1))) })} /><small>默认 10，超过并发上限的任务会自动排队。</small></label>
           <label>默认模型<input value={form.defaultModel} onChange={(event) => setForm({ ...form, defaultModel: event.target.value })} /></label>
           <button type="button" className="primary save-settings" onClick={save} disabled={saving}><Save size={16} />{saving ? '保存中' : '保存设置'}</button>
         </div>
@@ -2462,7 +2503,7 @@ export default function App() {
           {page === 'detail' && <DetailPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'tags' && <TagsPage groups={snapshot.tagGroups} onSave={saveTags} />}
           {page === 'batches' && <BatchesPage snapshot={snapshot} onRefresh={refresh} onNotice={setNotice} />}
-          {page === 'settings' && <SettingsPage settings={snapshot.settings} workspaceDirectory={snapshot.workspaceDirectory} outputDirectory={snapshot.outputDirectory} configFile={snapshot.configFile} onSaved={(settings) => { setSnapshot((current) => ({ ...current, settings })); setNotice('设置已保存'); }} />}
+          {page === 'settings' && <SettingsPage settings={snapshot.settings} workspaceDirectory={snapshot.workspaceDirectory} outputDirectory={snapshot.outputDirectory} configFile={snapshot.configFile} onSaved={(settings) => { setSnapshot((current) => ({ ...current, settings, draft: { ...current.draft, model: modelForInvocation(current.draft.model, settings.invocationMode), tasks: current.draft.tasks.map((task) => ({ ...task, model: modelForInvocation(task.model || current.draft.model, settings.invocationMode) })) } })); setNotice('设置已保存'); }} />}
         </div>
       </div>
       {notice && <div className="toast"><Check size={16} />{notice}</div>}
