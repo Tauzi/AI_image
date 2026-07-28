@@ -1,6 +1,6 @@
 export type InvocationMode = 'async' | 'sync';
-export type GenerationSource = 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail' | 'detail-generate';
-export type PageId = 'studio' | 'workbench' | 'templates' | 'assets' | 'stamp' | 'garment3d' | 'detail-generate' | 'detail' | 'tags' | 'batches' | 'settings';
+export type GenerationSource = 'single' | 'batch' | 'template' | 'product-main' | 'product-main-square' | 'workbench' | 'stamp' | 'garment3d' | 'resource' | 'detail' | 'detail-generate' | 'sku';
+export type PageId = 'studio' | 'product-main' | 'workbench' | 'templates' | 'resources' | 'assets' | 'stamp' | 'garment3d' | 'detail-generate' | 'detail' | 'sku' | 'tags' | 'batches' | 'settings';
 
 export interface ImageService {
   id: string;
@@ -10,6 +10,18 @@ export interface ImageService {
 }
 
 export interface ImageServiceInput extends Omit<ImageService, 'hasApiKey'> {
+  apiKey?: string;
+}
+
+export interface TextService {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  hasApiKey: boolean;
+}
+
+export interface TextServiceInput extends Omit<TextService, 'hasApiKey'> {
   apiKey?: string;
 }
 
@@ -24,8 +36,11 @@ export interface PublicSettings {
   invocationMode: InvocationMode;
   activeServiceId: string;
   services: ImageService[];
+  activeTextServiceId: string;
+  textServices: TextService[];
   imageRatios: ImageRatioPreset[];
   hasApiKey: boolean;
+  hasTextApiKey: boolean;
 }
 
 export interface SettingsInput {
@@ -33,6 +48,8 @@ export interface SettingsInput {
   invocationMode: InvocationMode;
   activeServiceId: string;
   services: ImageServiceInput[];
+  activeTextServiceId: string;
+  textServices: TextServiceInput[];
   imageRatios: ImageRatioPreset[];
 }
 
@@ -44,6 +61,16 @@ export interface AssetRecord {
   kind: 'reference';
   createdAt: string;
   preview?: string;
+  resourceCategoryId?: string;
+  isLibraryResource?: boolean;
+  resourceProcessingPrompt?: string;
+  sourceGenerationId?: string;
+}
+
+export interface ResourceCategory {
+  id: string;
+  name: string;
+  createdAt: string;
 }
 
 export interface ReferenceSlots {
@@ -85,6 +112,36 @@ export interface GenerationTask {
   useSharedPrompt?: boolean;
   stampPostProcess?: StampPostProcess;
   detailAssets?: AssetRecord[];
+  productAssets?: AssetRecord[];
+  resourceAssets?: AssetRecord[];
+  resourceReplacementAssetId?: string;
+  sourceGenerationId?: string;
+}
+
+export interface WorkbenchGenerationNode {
+  id: string;
+  name: string;
+  prompt: string;
+  model: string;
+  ratio: string;
+  resolution: string;
+  x: number;
+  y: number;
+  referenceAssetIds: string[];
+}
+
+export interface SkuVariant {
+  id: string;
+  attribute: string;
+  color: string;
+  size: string;
+  customPrompt: string;
+}
+
+export interface ProductMainPrompt {
+  id: string;
+  title: string;
+  prompt: string;
 }
 
 export interface PromptTemplate {
@@ -150,6 +207,9 @@ export interface GenerationRecord {
   remoteServiceId?: string;
   outputBaseName?: string;
   stampPostProcess?: StampPostProcess;
+  taskSnapshot?: GenerationTask;
+  reviewStatus?: 'qualified' | 'rejected';
+  hiddenFromProductMain?: boolean;
 }
 
 export interface BatchRecord {
@@ -194,6 +254,24 @@ export interface DraftState {
   workbenchSubcategoryId?: string;
   workbenchPrompt?: string;
   workbenchSelections?: Record<string, string>;
+  workbenchNodes?: WorkbenchGenerationNode[];
+  workbenchBatchPrefix?: string;
+  queueSharedResources?: AssetRecord[];
+  skuReferenceAssets?: AssetRecord[];
+  skuVariants?: SkuVariant[];
+  skuBatchTag?: string;
+  skuRatio?: string;
+  skuResolution?: string;
+  skuModel?: string;
+  productMainReference?: AssetRecord | null;
+  productMainRequirement?: string;
+  productMainTypes?: string[];
+  productMainBatchPrefix?: string;
+  productMainResolution?: string;
+  productMainModel?: string;
+  productMainRatio?: string;
+  productMainPromptText?: string;
+  productMainPrompts?: ProductMainPrompt[];
 }
 
 export interface AppSnapshot {
@@ -204,6 +282,7 @@ export interface AppSnapshot {
   templates: PromptTemplate[];
   tagGroups: TagGroup[];
   draft: DraftState;
+  resourceCategories: ResourceCategory[];
   workspaceDirectory: string;
   outputDirectory: string;
   configFile: string;

@@ -17,6 +17,8 @@ import {
   ImagePlus,
   Maximize2,
   Paintbrush,
+  Package,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -39,11 +41,14 @@ import type {
   PageId,
   PromptTemplate,
   PublicSettings,
+  ProductMainPrompt,
+  ResourceCategory,
   SettingsInput,
-  ReferenceSlots,
+  SkuVariant,
   TagCategory,
   TagGroup,
   TagSubcategory,
+  WorkbenchGenerationNode,
 } from './types';
 import logoUrl from './assets/workbench-logo.svg';
 
@@ -82,16 +87,20 @@ const LABEL_DIMENSIONS = ['图片类型', '展示方式', '模特类型', '动�
 const DEFAULT_ASPECT_RATIOS = ['1:1', '3:4', '9:16'];
 const DEFAULT_IMAGE_MODEL = 'gpt-image-2-async';
 const TWO_K_IMAGE_MODEL = 'gpt-image-2-2k-async';
+const PRODUCT_MAIN_REQUIREMENT = '保持商品款式、颜色、材质、结构和品牌细节准确，主体完整清晰，构图适合电商平台主图，背景干净，光线自然专业，不添加无关文字、Logo、水印或道具。';
 
 const PAGE_META: Record<PageId, { title: string; subtitle: string }> = {
   studio: { title: 'AI 创作工作台', subtitle: '整理素材、组合参数并批量生成可交付图片' },
+  'product-main': { title: '商品主图', subtitle: '识别八组主图提示词，以换装白底图按所选尺寸生成八张主图' },
   workbench: { title: '生图工作台', subtitle: '选择标签组合提示词，在画布中持续迭代图片' },
   templates: { title: '提示词模板', subtitle: '保存稳定的视觉配方并快速复用' },
+  resources: { title: '资源库', subtitle: '分类管理模特、背景、商品与其他可复用参考图' },
   assets: { title: '资产库', subtitle: '集中浏览全部生成图片，并按来源、模型与日期快速筛选' },
   stamp: { title: '精准产品贴标', subtitle: '自由定位 Logo，自动去除底色并融合到服装或包包表面' },
   garment3d: { title: '3D服装白底图', subtitle: '将服装参考图生成居中的立体白底产品展示图' },
   'detail-generate': { title: '详情页生成', subtitle: '上传产品图并生成完整的电商详情页图片组' },
   detail: { title: '详情页重排', subtitle: '批量上传详情图，以共享或独立提示词生成全新排版' },
+  sku: { title: 'SKU主图', subtitle: '按商品属性、颜色、尺码批量生成清晰一致的 SKU 选项图' },
   tags: { title: '标签管理', subtitle: '管理可选择并替换到生图提示词中的标签' },
   batches: { title: '批次记录', subtitle: '追踪每次批量任务的完成情况' },
   settings: { title: '服务设置', subtitle: '配置生图服务、API Key、自定义比例与本地工作目录' },
@@ -143,6 +152,32 @@ function modelForInvocation(currentModel: string, invocationMode: PublicSettings
 
 function newId(): string {
   return crypto.randomUUID();
+}
+
+function useImagePaste(onImage: (asset: AssetRecord) => void | Promise<void>, onError: (message: string) => void) {
+  const onImageRef = useRef(onImage);
+  const onErrorRef = useRef(onError);
+
+  useEffect(() => { onImageRef.current = onImage; }, [onImage]);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+
+  useEffect(() => {
+    const handlePaste = async (event: ClipboardEvent) => {
+      const hasImage = Array.from(event.clipboardData?.items ?? []).some((item) => item.type.startsWith('image/'))
+        || Array.from(event.clipboardData?.files ?? []).some((file) => file.type.startsWith('image/'));
+      if (!hasImage) return;
+      event.preventDefault();
+      try {
+        const asset = await window.imageStudio.pasteImage();
+        if (asset) await onImageRef.current(asset);
+        else onErrorRef.current('剪贴板中没有可读取的图片');
+      } catch (error) {
+        onErrorRef.current(error instanceof Error ? error.message : '粘贴图片失败');
+      }
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, []);
 }
 
 function composePrompt(
@@ -213,19 +248,23 @@ function emptySnapshot(): AppSnapshot {
       invocationMode: 'async',
       activeServiceId: '',
       services: [],
+      activeTextServiceId: '',
+      textServices: [],
       imageRatios: [
         { id: 'ratio-square', name: '1:1', size: '1024x1024' },
         { id: 'ratio-portrait', name: '3:4', size: '768x1024' },
         { id: 'ratio-tall', name: '9:16', size: '576x1024' },
       ],
       hasApiKey: false,
+      hasTextApiKey: false,
     },
     assets: [],
     generations: [],
     batches: [],
     templates: [],
     tagGroups: [],
-    draft: { mode: 'batch', batchTag: 'multi', model: 'gpt-image-2-async', tasks: [firstTask], queueShared: { front: null, side: null }, queueOutput: { frontQuantity: 10, sideQuantity: 0, frontRatio: '1:1', sideRatio: '3:4', frontRatios: ['1:1'], sideRatios: ['3:4'] }, queueRandomInitialized: false, detailSharedPrompt: '', detailTasks: [], detailBatchTag: 'relayout', outputRatios: ['3:4'], stampPrompt: '' },
+    resourceCategories: [],
+    draft: { mode: 'batch', batchTag: 'multi', model: 'gpt-image-2-async', tasks: [firstTask], queueShared: { front: null, side: null }, queueOutput: { frontQuantity: 10, sideQuantity: 0, frontRatio: '1:1', sideRatio: '3:4', frontRatios: ['1:1'], sideRatios: ['3:4'] }, queueRandomInitialized: false, detailSharedPrompt: '', detailTasks: [], detailBatchTag: 'relayout', outputRatios: ['3:4'], stampPrompt: '', workbenchBatchPrefix: '生图台', skuReferenceAssets: [], skuVariants: [{ id: newId(), attribute: '', color: '', size: '', customPrompt: '' }], skuBatchTag: 'sku', skuRatio: '1:1', skuResolution: '1K', skuModel: 'gpt-image-2-async', productMainReference: null, productMainRequirement: PRODUCT_MAIN_REQUIREMENT, productMainTypes: ['正面展示'], productMainBatchPrefix: '商品主图', productMainResolution: '1K', productMainModel: 'gpt-image-2-async', productMainRatio: '1:1', productMainPromptText: '', productMainPrompts: [] },
     workspaceDirectory: '',
     outputDirectory: '',
     configFile: '',
@@ -296,13 +335,16 @@ function ImagePreviewModal({ record, onClose, onPrevious, onNext }: { record: Ge
 function Sidebar({ page, onChange }: { page: PageId; onChange: (page: PageId) => void }) {
   const items: Array<{ id: PageId; label: string; icon: typeof Sparkles }> = [
     { id: 'studio', label: '生成', icon: Sparkles },
+    { id: 'product-main', label: '商品主图', icon: Image },
     { id: 'workbench', label: '生图台', icon: Paintbrush },
     { id: 'templates', label: '模板', icon: Layers3 },
+    { id: 'resources', label: '资源库', icon: Images },
     { id: 'assets', label: '资产库', icon: Archive },
     { id: 'stamp', label: '贴标', icon: Tag },
     { id: 'garment3d', label: '3D白底', icon: Boxes },
     { id: 'detail-generate', label: '详情页生成', icon: ImagePlus },
     { id: 'detail', label: '详情页重排', icon: Image },
+    { id: 'sku', label: 'SKU主图', icon: Package },
     { id: 'tags', label: '标签', icon: Tag },
     { id: 'batches', label: '任务', icon: Boxes },
     { id: 'settings', label: '设置', icon: Settings },
@@ -395,6 +437,84 @@ function UploadSlot({
   );
 }
 
+function MultiAssetField({
+  label,
+  assets,
+  required,
+  onUpload,
+  onOpenLibrary,
+  onRemove,
+  uploadLabel = '上传',
+}: {
+  label: string;
+  assets: AssetRecord[];
+  required?: boolean;
+  onUpload: () => void;
+  onOpenLibrary: () => void;
+  onRemove: (assetId: string) => void;
+  uploadLabel?: string;
+}) {
+  return <div className="multi-asset-field">
+    <header><span>{label}{required && <b> *</b>}</span><small>{assets.length} 张</small></header>
+    <div className="multi-asset-grid">
+      {assets.map((asset) => <div className="multi-asset-thumb" key={asset.id} title={asset.name}>
+        <LocalImage asset={asset} alt={asset.name} />
+        <button type="button" title="移除图片" onClick={() => onRemove(asset.id)}><X size={12} /></button>
+      </div>)}
+      <button type="button" className="multi-asset-add" onClick={onUpload} title={`${uploadLabel}${label}`}><Plus size={20} /><span>{uploadLabel}</span></button>
+    </div>
+    <button type="button" className="secondary resource-select-button" onClick={onOpenLibrary}><Images size={15} />从资源库选择</button>
+  </div>;
+}
+
+function ResourcePickerModal({
+  assets,
+  categories,
+  selectedIds,
+  onConfirm,
+  onClose,
+}: {
+  assets: AssetRecord[];
+  categories: ResourceCategory[];
+  selectedIds: string[];
+  onConfirm: (assets: AssetRecord[]) => void;
+  onClose: () => void;
+}) {
+  const libraryAssets = assets.filter((asset) => asset.isLibraryResource);
+  const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '');
+  const [selection, setSelection] = useState(() => new Set(selectedIds));
+  const visible = categoryId ? libraryAssets.filter((asset) => asset.resourceCategoryId === categoryId) : libraryAssets;
+  return <div className="resource-picker-backdrop" role="dialog" aria-modal="true" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="resource-picker-modal">
+      <header><div><h2>选择资源</h2><p>可跨分类选择多张模特、背景或商品参考图</p></div><button type="button" className="icon-button" title="关闭" onClick={onClose}><X size={18} /></button></header>
+      <div className="resource-picker-body">
+        <aside><button type="button" className={!categoryId ? 'selected' : ''} onClick={() => setCategoryId('')}>全部 <span>{libraryAssets.length}</span></button>{categories.map((category) => <button type="button" key={category.id} className={categoryId === category.id ? 'selected' : ''} onClick={() => setCategoryId(category.id)}>{category.name}<span>{libraryAssets.filter((asset) => asset.resourceCategoryId === category.id).length}</span></button>)}</aside>
+        <main>{visible.length > 0 ? visible.map((asset) => <button type="button" className={selection.has(asset.id) ? 'resource-picker-item selected' : 'resource-picker-item'} key={asset.id} onClick={() => setSelection((current) => { const next = new Set(current); if (next.has(asset.id)) next.delete(asset.id); else next.add(asset.id); return next; })}><div><LocalImage asset={asset} alt={asset.name} />{selection.has(asset.id) && <span><Check size={14} /></span>}</div><strong title={asset.name}>{asset.name}</strong></button>) : <div className="resource-picker-empty"><ImagePlus size={28} /><span>这个分类还没有资源</span></div>}</main>
+      </div>
+      <footer><span>已选择 {selection.size} 张</span><div><button type="button" className="secondary" onClick={onClose}>取消</button><button type="button" className="primary" onClick={() => onConfirm(libraryAssets.filter((asset) => selection.has(asset.id)))}>确认选择</button></div></footer>
+    </div>
+  </div>;
+}
+
+function RetryButton({ record, compact = false }: { record: GenerationRecord; compact?: boolean }) {
+  const [retrying, setRetrying] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [error, setError] = useState('');
+  const retry = async () => {
+    setRetrying(true);
+    setError('');
+    try {
+      await window.imageStudio.retryGeneration(record.id);
+      setSubmitted(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '重试失败');
+    } finally {
+      setRetrying(false);
+    }
+  };
+  return <div className={compact ? 'retry-control compact' : 'retry-control'}><button type="button" className="secondary" disabled={retrying || submitted} onClick={retry}><RefreshCw size={14} className={retrying ? 'spin' : ''} />{retrying ? '提交中' : submitted ? '已重试' : '重试'}</button>{error && <small>{error}</small>}</div>;
+}
+
 function ChipGroup({ values, value, onChange }: { values: string[]; value: string; onChange: (value: string) => void }) {
   return (
     <div className="chip-row">
@@ -417,6 +537,8 @@ function TaskCard({
   onAssetImported,
   tagGroups,
   outputRatios,
+  libraryAssets,
+  resourceCategories,
 }: {
   task: GenerationTask;
   index: number;
@@ -427,16 +549,34 @@ function TaskCard({
   onAssetImported: (asset: AssetRecord) => void;
   tagGroups: TagGroup[];
   outputRatios: string[];
+  libraryAssets: AssetRecord[];
+  resourceCategories: ResourceCategory[];
 }) {
   const activeGroup = tagGroups.find((group) => group.id === task.tagGroupId) ?? tagGroups[0];
   const activeSubcategory = activeGroup?.subcategories.find((subcategory) => subcategory.id === task.tagSubcategoryId) ?? activeGroup?.subcategories[0];
   const tagCategories = activeSubcategory?.dimensions ?? [];
   const set = <K extends keyof GenerationTask>(key: K, value: GenerationTask[K]) => onUpdate({ ...task, [key]: value });
-  const pickReference = async (slot: keyof ReferenceSlots) => {
-    const asset = await window.imageStudio.pickImage();
-    if (!asset) return;
-    onAssetImported(asset);
-    set('references', { ...task.references, [slot]: asset });
+  const productAssets = task.productAssets?.length
+    ? task.productAssets
+    : [task.references.garment, task.references.side].filter((asset): asset is AssetRecord => Boolean(asset));
+  const resourceAssets = task.resourceAssets ?? [task.references.face].filter((asset): asset is AssetRecord => Boolean(asset));
+  const [pickerTarget, setPickerTarget] = useState<'products' | 'resources' | null>(null);
+  const updateProductAssets = (next: AssetRecord[]) => onUpdate({
+    ...task,
+    productAssets: next,
+    references: { ...task.references, garment: next[0] ?? null, side: next[1] ?? null },
+  });
+  const updateResourceAssets = (next: AssetRecord[]) => onUpdate({
+    ...task,
+    resourceAssets: next,
+    references: { ...task.references, face: next[0] ?? null },
+  });
+  const pickProducts = async () => {
+    const assets = await window.imageStudio.pickImages();
+    if (assets.length === 0) return;
+    assets.forEach(onAssetImported);
+    const existing = new Set(productAssets.map((asset) => asset.id));
+    updateProductAssets([...productAssets, ...assets.filter((asset) => !existing.has(asset.id))]);
   };
   const updateDimension = (name: string, value: string) => {
     const nextTask = { ...task, dimensions: { ...task.dimensions, [name]: value } };
@@ -482,10 +622,9 @@ function TaskCard({
       </div>
       <div className="task-grid">
         <section className="reference-panel" aria-label="参考图片和输出参数">
-          <div className="upload-grid">
-            <UploadSlot label="服装图" required asset={task.references.garment} onPick={() => pickReference('garment')} onRemove={() => set('references', { ...task.references, garment: null })} />
-            <UploadSlot label="侧面服装图" asset={task.references.side} onPick={() => pickReference('side')} onRemove={() => set('references', { ...task.references, side: null })} />
-            <UploadSlot label="面部图" asset={task.references.face} onPick={() => pickReference('face')} onRemove={() => set('references', { ...task.references, face: null })} />
+          <div className="task-multi-assets">
+            <MultiAssetField label="服装 / 商品图" required assets={productAssets} onUpload={pickProducts} onOpenLibrary={() => setPickerTarget('products')} onRemove={(assetId) => updateProductAssets(productAssets.filter((asset) => asset.id !== assetId))} />
+            <MultiAssetField label="模特 / 背景等资源" assets={resourceAssets} uploadLabel="选择" onUpload={() => setPickerTarget('resources')} onOpenLibrary={() => setPickerTarget('resources')} onRemove={(assetId) => updateResourceAssets(resourceAssets.filter((asset) => asset.id !== assetId))} />
           </div>
           <label className="field-label">大分类</label>
           <select className="tag-group-select" value={activeGroup?.id ?? ''} onChange={(event) => changeGroup(event.target.value)}>
@@ -520,9 +659,10 @@ function TaskCard({
             <button type="button" onClick={() => set('prompt', composePrompt(task, activeGroup, activeSubcategory))}><RefreshCw size={14} />重新组合</button>
           </div>
           <textarea value={task.prompt} onChange={(event) => set('prompt', event.target.value)} />
-          <div className="prompt-meta"><span>{task.prompt.length} 字</span><span>{Object.values(task.references).filter(Boolean).length}/3 参考图</span></div>
+          <div className="prompt-meta"><span>{task.prompt.length} 字</span><span>{new Set([...productAssets, ...resourceAssets].map((asset) => asset.id)).size} 张参考图</span></div>
         </section>
       </div>
+      {pickerTarget && <ResourcePickerModal assets={libraryAssets} categories={resourceCategories} selectedIds={(pickerTarget === 'products' ? productAssets : resourceAssets).filter((asset) => asset.isLibraryResource).map((asset) => asset.id)} onClose={() => setPickerTarget(null)} onConfirm={(assets) => { if (pickerTarget === 'products') updateProductAssets([...productAssets.filter((asset) => !asset.isLibraryResource), ...assets]); else updateResourceAssets(assets); setPickerTarget(null); }} />}
     </article>
   );
 }
@@ -538,7 +678,7 @@ function TaskResults({ records }: { records: GenerationRecord[] }) {
         {visible.map((record) => record.status === 'pending' ? <article key={record.id} className="task-result-item generation-placeholder"><div className="result-image-wrap"><LoaderCircle size={28} className="spin" /><strong>生成中</strong><span>{record.ratio} · {record.resolution}</span></div></article> : record.status === 'success' ? <article key={record.id} className="task-result-item" onDoubleClick={() => window.imageStudio.revealFile(record.outputPath)}>
           <div className="result-image-wrap"><LocalImage path={record.outputPath} alt={record.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={(event) => { event.stopPropagation(); setPreview(record); }}><Maximize2 size={15} /></button></div>
           <footer><span>{record.batchPrefix} · {record.ratio} · {record.resolution}</span><button type="button" onClick={() => window.imageStudio.revealFile(record.outputPath)}>定位文件</button></footer>
-        </article> : <article key={record.id} className="task-result-error"><CircleAlert size={16} /><div><strong>生成失败</strong><span>{record.error}</span></div></article>)}
+        </article> : <article key={record.id} className="task-result-error"><CircleAlert size={16} /><div><strong>生成失败</strong><span>{record.error}</span><RetryButton record={record} compact /></div></article>)}
       </div>
     </section>
     {preview && <ImagePreviewModal record={preview} onClose={() => setPreview(null)} />}
@@ -563,12 +703,17 @@ function TemplateQueuePage({
   onAssets: (asset: AssetRecord) => void;
 }) {
   const [presetId, setPresetId] = useState('');
+  const [resourcePicker, setResourcePicker] = useState<{ scope: 'shared' | 'task' | 'products'; taskId?: string } | null>(null);
   const availableRatios = ratioNames(snapshot.settings);
   const baseTask = draft.tasks[0] ?? createTask(1, snapshot.tagGroups[0]);
   const activeGroup = snapshot.tagGroups.find((group) => group.id === baseTask.tagGroupId) ?? snapshot.tagGroups[0];
   const activeSubcategory = activeGroup?.subcategories.find((subcategory) => subcategory.id === baseTask.tagSubcategoryId) ?? activeGroup?.subcategories[0];
   const categories = activeSubcategory?.dimensions ?? [];
-  const readyTasks = draft.tasks.filter((task) => Boolean(task.references.garment));
+  const taskProducts = (task: GenerationTask) => task.productAssets?.length
+    ? task.productAssets
+    : [task.references.garment, task.references.side].filter((asset): asset is AssetRecord => Boolean(asset));
+  const taskResources = (task: GenerationTask) => task.resourceAssets ?? [];
+  const readyTasks = draft.tasks.filter((task) => taskProducts(task).length > 0);
   const presetForTask = (task: GenerationTask) => snapshot.templates.find((template) => template.id === task.queuePresetId);
   const outputForTask = (task: GenerationTask) => presetForTask(task)?.queueOutput ?? draft.queueOutput;
   const frontForTask = (task: GenerationTask) => {
@@ -599,6 +744,8 @@ function TemplateQueuePage({
     quantity: baseTask.quantity,
     queuePresetId: '',
     references: { garment, side, face: null },
+    productAssets: [garment, side].filter((asset): asset is AssetRecord => Boolean(asset)),
+    resourceAssets: [],
   });
   const pickShared = async (slot: 'front' | 'side') => {
     const asset = await window.imageStudio.pickImage();
@@ -606,17 +753,31 @@ function TemplateQueuePage({
     onAssets(asset);
     onDraft({ ...draft, queueShared: { ...draft.queueShared, [slot]: asset } });
   };
-  const pickTaskReference = async (taskId: string, slot: 'garment' | 'side') => {
-    const asset = await window.imageStudio.pickImage();
-    if (!asset) return;
-    onAssets(asset);
-    updateTasks((task) => task.id === taskId ? { ...task, references: { ...task.references, [slot]: asset } } : task);
+  const setTaskProducts = (taskId: string, assets: AssetRecord[]) => updateTasks((task) => task.id === taskId ? {
+    ...task,
+    productAssets: assets,
+    references: { ...task.references, garment: assets[0] ?? null, side: assets[1] ?? null },
+  } : task);
+  const setTaskResources = (taskId: string, assets: AssetRecord[]) => updateTasks((task) => task.id === taskId ? {
+    ...task,
+    resourceAssets: assets,
+    references: { ...task.references, face: assets[0] ?? null },
+  } : task);
+  const pickTaskProducts = async (taskId: string) => {
+    const assets = await window.imageStudio.pickImages();
+    if (assets.length === 0) return;
+    assets.forEach(onAssets);
+    const task = draft.tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    const current = taskProducts(task);
+    const existing = new Set(current.map((asset) => asset.id));
+    setTaskProducts(taskId, [...current, ...assets.filter((asset) => !existing.has(asset.id))]);
   };
   const batchAdd = async () => {
     const assets = await window.imageStudio.pickImages();
     if (assets.length === 0) return;
     assets.forEach(onAssets);
-    const current = draft.tasks.length === 1 && !draft.tasks[0].references.garment && !draft.tasks[0].references.side ? [] : draft.tasks;
+    const current = draft.tasks.length === 1 && taskProducts(draft.tasks[0]).length === 0 ? [] : draft.tasks;
     const grouped = new Map<string, { name: string; garment: AssetRecord | null; side: AssetRecord | null }>();
     for (const asset of assets) {
       const stem = asset.name.replace(/\.[^.]+$/, '');
@@ -698,6 +859,7 @@ function TemplateQueuePage({
             <UploadSlot label="共享侧脸图" asset={draft.queueShared.side} onPick={() => pickShared('side')} onRemove={() => onDraft({ ...draft, queueShared: { ...draft.queueShared, side: null } })} />
             <p>上传一张清晰正面模特图。生成时会自动与每款服装参考图组合。</p>
           </div>
+          <MultiAssetField label="共享资源库参考" assets={draft.queueSharedResources ?? []} uploadLabel="选择" onUpload={() => setResourcePicker({ scope: 'shared' })} onOpenLibrary={() => setResourcePicker({ scope: 'shared' })} onRemove={(assetId) => onDraft({ ...draft, queueSharedResources: (draft.queueSharedResources ?? []).filter((asset) => asset.id !== assetId) })} />
         </section>
 
         <section className="queue-card queue-progress-card">
@@ -733,8 +895,8 @@ function TemplateQueuePage({
                 <article className="garment-queue-item">
                   <div className="garment-queue-index">{String(index + 1).padStart(2, '0')}</div>
                   <div className="garment-queue-uploads">
-                    <UploadSlot label="服装参考图" required asset={task.references.garment} onPick={() => pickTaskReference(task.id, 'garment')} onRemove={() => updateTasks((item) => item.id === task.id ? { ...item, references: { ...item.references, garment: null } } : item)} />
-                    <UploadSlot label="侧面服装图" asset={task.references.side} onPick={() => pickTaskReference(task.id, 'side')} onRemove={() => updateTasks((item) => item.id === task.id ? { ...item, references: { ...item.references, side: null } } : item)} />
+                    <MultiAssetField label="服装 / 商品图" required assets={taskProducts(task)} onUpload={() => pickTaskProducts(task.id)} onOpenLibrary={() => setResourcePicker({ scope: 'products', taskId: task.id })} onRemove={(assetId) => setTaskProducts(task.id, taskProducts(task).filter((asset) => asset.id !== assetId))} />
+                    <MultiAssetField label="模特 / 背景资源" assets={taskResources(task)} uploadLabel="选择" onUpload={() => setResourcePicker({ scope: 'task', taskId: task.id })} onOpenLibrary={() => setResourcePicker({ scope: 'task', taskId: task.id })} onRemove={(assetId) => setTaskResources(task.id, taskResources(task).filter((asset) => asset.id !== assetId))} />
                   </div>
                   <label>款式名称<input value={task.name} onChange={(event) => updateTasks((item) => item.id === task.id ? { ...item, name: event.target.value } : item)} /></label>
                   <button type="button" className="icon-button" title="删除款式" onClick={() => onDraft({ ...draft, tasks: draft.tasks.filter((item) => item.id !== task.id) })}><Trash2 size={15} /></button>
@@ -769,10 +931,20 @@ function TemplateQueuePage({
         <section><h3>正面比例与数量</h3><select value={draft.queueOutput.frontRatio} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontRatio: event.target.value, frontRatios: [event.target.value] } })}>{availableRatios.map((ratio) => <option key={ratio}>{ratio}</option>)}</select><div className="ratio-quantity-grid"><label><span>{draft.queueOutput.frontRatio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'front', draft.queueOutput.frontRatio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, frontQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)), frontRatioQuantities: { ...draft.queueOutput.frontRatioQuantities, [draft.queueOutput.frontRatio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label></div></section>
         <section><h3>侧面比例与数量</h3><select value={draft.queueOutput.sideRatio} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideRatio: event.target.value, sideRatios: [event.target.value] } })}>{availableRatios.map((ratio) => <option key={ratio}>{ratio}</option>)}</select><div className="ratio-quantity-grid"><label><span>{draft.queueOutput.sideRatio}</span><input type="number" min="0" value={queueRatioQuantity(draft.queueOutput, 'side', draft.queueOutput.sideRatio)} onChange={(event) => onDraft({ ...draft, queueOutput: { ...draft.queueOutput, sideQuantity: Math.max(0, Math.floor(Number(event.target.value) || 0)), sideRatioQuantities: { ...draft.queueOutput.sideRatioQuantities, [draft.queueOutput.sideRatio]: Math.max(0, Math.floor(Number(event.target.value) || 0)) } } })} /></label></div></section>
         <section><h3>生成模型</h3><div className="queue-model-options"><button type="button" className="selected">{draft.model}</button></div><input value={draft.model} onChange={(event) => onDraft({ ...draft, model: event.target.value })} /></section>
-        <section><h3>批次标签</h3><input value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></section>
+        <section><h3>批次前缀</h3><input maxLength={48} value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></section>
         <button type="button" className="primary queue-start-button" disabled={generationBusy || readyTasks.length === 0 || missingFaceCount > 0 || total === 0} onClick={onGenerate}>{generationBusy ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{generating ? '提交中' : generationBusy ? `模板队列生成中（剩余 ${pendingCount} 张）` : `开始生成 ${total} 张`}</button>
         {missingFaceCount > 0 && <p className="queue-required-tip">有 {missingFaceCount} 款缺少共享或独立预设的正面人脸图</p>}
       </aside>
+      {resourcePicker && (() => {
+        const task = resourcePicker.taskId ? draft.tasks.find((item) => item.id === resourcePicker.taskId) : undefined;
+        const selected = resourcePicker.scope === 'shared' ? (draft.queueSharedResources ?? []) : resourcePicker.scope === 'products' && task ? taskProducts(task) : task ? taskResources(task) : [];
+        return <ResourcePickerModal assets={snapshot.assets} categories={snapshot.resourceCategories} selectedIds={selected.map((asset) => asset.id)} onClose={() => setResourcePicker(null)} onConfirm={(assets) => {
+          if (resourcePicker.scope === 'shared') onDraft({ ...draft, queueSharedResources: assets });
+          else if (resourcePicker.scope === 'products' && resourcePicker.taskId && task) setTaskProducts(resourcePicker.taskId, [...taskProducts(task).filter((asset) => !asset.isLibraryResource), ...assets]);
+          else if (resourcePicker.taskId) setTaskResources(resourcePicker.taskId, assets);
+          setResourcePicker(null);
+        }} />;
+      })()}
     </div>
   );
 }
@@ -785,6 +957,7 @@ function StudioPage({
   onDraft,
   onGenerate,
   onAssets,
+  onNotice,
 }: {
   snapshot: AppSnapshot;
   draft: DraftState;
@@ -793,7 +966,25 @@ function StudioPage({
   onDraft: (draft: DraftState) => void;
   onGenerate: () => void;
   onAssets: (asset: AssetRecord) => void;
+  onNotice: (message: string) => void;
 }) {
+  const [pasteTaskId, setPasteTaskId] = useState(draft.tasks[0]?.id ?? '');
+  useImagePaste((asset) => {
+    const targetId = draft.tasks.some((task) => task.id === pasteTaskId) ? pasteTaskId : draft.tasks[0]?.id;
+    if (!targetId) return;
+    onDraft({
+      ...draft,
+      tasks: draft.tasks.map((task) => {
+        if (task.id !== targetId) return task;
+        const current = task.productAssets?.length
+          ? task.productAssets
+          : [task.references.garment, task.references.side].filter((item): item is AssetRecord => Boolean(item));
+        const productAssets = Array.from(new Map([...current, asset].map((item) => [item.id, item])).values());
+        return { ...task, productAssets, references: { ...task.references, garment: productAssets[0] ?? null, side: productAssets[1] ?? null } };
+      }),
+    });
+    onNotice('已粘贴图片到当前生成任务');
+  }, onNotice);
   if (draft.mode === 'template') {
     return <TemplateQueuePage snapshot={snapshot} draft={draft} progress={progress} generating={generating} onDraft={onDraft} onGenerate={onGenerate} onAssets={onAssets} />;
   }
@@ -826,7 +1017,7 @@ function StudioPage({
         )}
         <div className="task-list">
           {visibleTasks.map((task, index) => (
-            <div className="task-block" key={task.id}>
+            <div className="task-block" key={task.id} onPointerDown={() => setPasteTaskId(task.id)}>
               <TaskCard
                 task={task}
                 index={index + 1}
@@ -837,6 +1028,8 @@ function StudioPage({
                 onAssetImported={onAssets}
                 tagGroups={snapshot.tagGroups}
                 outputRatios={outputRatios}
+                libraryAssets={snapshot.assets}
+                resourceCategories={snapshot.resourceCategories}
               />
               <TaskResults records={snapshot.generations.filter((record) => record.taskId === task.id)} />
             </div>
@@ -845,7 +1038,7 @@ function StudioPage({
       </main>
       <aside className="batch-panel">
         <h2>批次设置</h2>
-        <label>批次标签<input value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></label>
+        <label>批次前缀<input maxLength={48} value={draft.batchTag} onChange={(event) => onDraft({ ...draft, batchTag: event.target.value })} /></label>
         <div className="field-label">生成模型</div>
         <div className="model-options">
           {modelPresets.map((model) => <button type="button" key={model} className={draft.model === model ? 'chip selected' : 'chip'} onClick={() => onDraft({ ...draft, model })}>{model}</button>)}
@@ -870,6 +1063,251 @@ function StudioPage({
   );
 }
 
+function createBlankProductMainPrompt(index: number): ProductMainPrompt {
+  return { id: newId(), title: `主图 ${index}`, prompt: '' };
+}
+
+function parseProductMainPromptText(value: string): ProductMainPrompt[] {
+  const lines = value.replace(/\r\n?/g, '\n').split('\n');
+  const mainHeading = /^\s*(?:#{1,6}\s*)?(?:第\s*)?主图\s*([1-8一二三四五六七八])\s*[:：、.．-]?\s*(.*?)\s*$/;
+  const numberedHeading = /^\s*([1-8一二三四五六七八])\s*[、.．:：]\s*(.*?)\s*$/;
+  const hasMainHeadings = lines.some((line) => mainHeading.test(line));
+  const sections: Array<{ title: string; lines: string[] }> = [];
+  let current: { title: string; lines: string[] } | null = null;
+  for (const line of lines) {
+    const match = (hasMainHeadings ? mainHeading : numberedHeading).exec(line);
+    if (match) {
+      if (current) sections.push(current);
+      const index = sections.length + 1;
+      current = { title: match[2]?.trim() || `主图 ${index}`, lines: [] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  if (current) sections.push(current);
+  if (sections.length === 0) {
+    return value.split(/\n\s*\n+/).map((block) => block.trim()).filter(Boolean).slice(0, 8).map((prompt, index) => ({
+      id: newId(),
+      title: `主图 ${index + 1}`,
+      prompt,
+    }));
+  }
+  return sections.slice(0, 8).map((section, index) => ({
+    id: newId(),
+    title: section.title || `主图 ${index + 1}`,
+    prompt: section.lines.join('\n').trim().replace(/^中文生图提示词\s*[:：]?\s*/i, ''),
+  }));
+}
+
+function productMainAspectRatio(ratio: string, settings: PublicSettings): string {
+  const value = settings.imageRatios.find((preset) => preset.name === ratio)?.size ?? ratio;
+  const match = /^\s*([1-9]\d*)\s*[x×:]\s*([1-9]\d*)\s*$/i.exec(value);
+  return match ? `${match[1]} / ${match[2]}` : '1 / 1';
+}
+
+function ProductMainPage({
+  snapshot,
+  draft,
+  onDraft,
+  onRefresh,
+  onOpenSettings,
+  onNotice,
+  onAssets,
+}: {
+  snapshot: AppSnapshot;
+  draft: DraftState;
+  onDraft: (draft: DraftState) => void;
+  onRefresh: () => Promise<AppSnapshot>;
+  onOpenSettings: () => void;
+  onNotice: (message: string) => void;
+  onAssets: (asset: AssetRecord) => void;
+}) {
+  const reference = draft.productMainReference ?? null;
+  const promptText = draft.productMainPromptText ?? '';
+  const prompts = draft.productMainPrompts ?? [];
+  const batchPrefix = draft.productMainBatchPrefix || '商品主图';
+  const resolution = draft.productMainResolution || '1K';
+  const model = draft.productMainModel || snapshot.settings.defaultModel;
+  const ratio = draft.productMainRatio || snapshot.settings.imageRatios[0]?.name || '1:1';
+  const ratioPreset = snapshot.settings.imageRatios.find((preset) => preset.name === ratio);
+  const customRatio = !ratioPreset;
+  const ratioLabel = ratioPreset ? `${ratioPreset.name}（${ratioPreset.size}）` : ratio;
+  const [submitting, setSubmitting] = useState(false);
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [previewRecord, setPreviewRecord] = useState<GenerationRecord | null>(null);
+  const [resourceTarget, setResourceTarget] = useState<GenerationRecord | null>(null);
+  const [resourceMode, setResourceMode] = useState<'existing' | 'new'>('existing');
+  const [resourceCategoryId, setResourceCategoryId] = useState(snapshot.resourceCategories[0]?.id ?? '');
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [resourceSaving, setResourceSaving] = useState(false);
+  const [clearingRecords, setClearingRecords] = useState(false);
+  const records = snapshot.generations.filter((record) => record.source === 'product-main' && Boolean(record.taskSnapshot?.dimensions?.主图编号) && !record.hiddenFromProductMain);
+  const pending = records.filter((record) => record.status === 'pending').length;
+  const readyPromptCount = prompts.filter((item) => item.prompt.trim()).length;
+  const activeTextService = snapshot.settings.textServices.find((service) => service.id === snapshot.settings.activeTextServiceId);
+
+  const updateProductMainDraft = (update: Partial<DraftState>) => onDraft({
+    ...draft,
+    productMainReference: reference,
+    productMainPromptText: promptText,
+    productMainPrompts: prompts,
+    productMainBatchPrefix: batchPrefix,
+    productMainResolution: resolution,
+    productMainModel: model,
+    productMainRatio: ratio,
+    ...update,
+  });
+  const pickReference = async () => {
+    const asset = await window.imageStudio.pickImage();
+    if (!asset) return;
+    onAssets(asset);
+    updateProductMainDraft({ productMainReference: asset });
+  };
+  useImagePaste((asset) => {
+    updateProductMainDraft({ productMainReference: asset });
+    onNotice('已粘贴换装白底图');
+  }, onNotice);
+  const recognizePrompts = () => {
+    const recognized = parseProductMainPromptText(promptText);
+    updateProductMainDraft({ productMainPrompts: recognized });
+    if (recognized.length === 8 && recognized.every((item) => item.prompt.trim())) onNotice('已识别 8 组主图提示词');
+    else onNotice(`识别到 ${recognized.filter((item) => item.prompt.trim()).length} 组有效提示词，请补齐到 8 组`);
+  };
+  const generatePromptsWithAi = async () => {
+    if (!reference) return onNotice('请先上传换装后的白底图');
+    if (!snapshot.settings.hasTextApiKey) {
+      onNotice('请先配置当前 AI 文字服务的 API Key');
+      onOpenSettings();
+      return;
+    }
+    setAiGenerating(true);
+    try {
+      const generatedText = await window.imageStudio.generateProductMainPrompts(reference.id, ratioLabel);
+      const recognized = parseProductMainPromptText(generatedText);
+      updateProductMainDraft({ productMainPromptText: generatedText, productMainPrompts: recognized });
+      onNotice(recognized.length === 8 && recognized.every((item) => item.prompt.trim())
+        ? 'AI 已生成并识别 8 组主图提示词'
+        : `AI 已返回提示词，当前识别到 ${recognized.filter((item) => item.prompt.trim()).length} 组，请检查并补齐`);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : 'AI 主图提示词生成失败');
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+  const updatePrompt = (id: string, update: Partial<ProductMainPrompt>) => updateProductMainDraft({
+    productMainPrompts: prompts.map((item) => item.id === id ? { ...item, ...update } : item),
+  });
+  const addPrompt = () => {
+    if (prompts.length >= 8) return;
+    updateProductMainDraft({ productMainPrompts: [...prompts, createBlankProductMainPrompt(prompts.length + 1)] });
+  };
+  const removePrompt = (id: string) => updateProductMainDraft({
+    productMainPrompts: prompts.filter((item) => item.id !== id).map((item, index) => ({ ...item, title: item.title.trim() || `主图 ${index + 1}` })),
+  });
+  const generate = async () => {
+    if (!reference) return onNotice('请先上传换装后的白底图');
+    if (prompts.length !== 8 || readyPromptCount !== 8) return onNotice('请先识别并补齐 8 组主图提示词');
+    const requestedSize = ratioPreset?.size ?? ratio;
+    if (!/^[1-9]\d*[x×][1-9]\d*$/i.test(requestedSize.trim())) return onNotice('自定义尺寸必须使用“宽x高”格式，例如 1280x720');
+    if (!snapshot.settings.hasApiKey) {
+      onNotice('请先配置 API Key');
+      onOpenSettings();
+      return;
+    }
+    const tasks: GenerationTask[] = prompts.map((item, index) => ({
+      id: newId(),
+      name: `商品主图 ${String(index + 1).padStart(2, '0')} ${item.title.trim() || `主图 ${index + 1}`}`,
+      tagGroupId: '',
+      tagSubcategoryId: '',
+      references: { garment: reference, side: null, face: null },
+      productAssets: [reference],
+      dimensions: { 主图编号: String(index + 1), 主图主题: item.title.trim() },
+      direction: `主图 ${index + 1}`,
+      category: '商品主图',
+      ratio,
+      resolution,
+      quantity: 1,
+      model: modelForResolution(model, resolution),
+      prompt: `请以上传的换装白底图作为唯一商品与人物视觉参考，严格保持人物、服装款式、颜色、材质、结构、Logo、姿势和比例一致。\n\n本张主图主题：${item.title.trim() || `主图 ${index + 1}`}\n\n${item.prompt.trim()}\n\n输出 ${ratioLabel} 电商主图。不要改变商品身份，不要混入其他主图内容，不要生成水印或无关元素。`,
+    }));
+    setSubmitting(true);
+    try {
+      await window.imageStudio.startGeneration({ batchTag: batchPrefix, model, source: 'product-main', tasks });
+      await onRefresh();
+      onNotice('已提交 8 张商品主图，每张主图对应一次独立请求');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '商品主图任务提交失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  const openResourceDialog = (record: GenerationRecord) => {
+    setResourceTarget(record);
+    setResourceMode('existing');
+    setResourceCategoryId(snapshot.resourceCategories[0]?.id ?? '');
+    setNewCategoryName('');
+  };
+  const clearPageRecords = async () => {
+    if (records.length === 0) return;
+    if (!window.confirm('确定清空商品主图页面中的全部结果记录吗？\n\n图片文件、资产库记录和批次记录都会保留。')) return;
+    setClearingRecords(true);
+    try {
+      const count = await window.imageStudio.clearProductMainRecords();
+      await onRefresh();
+      onNotice(count > 0 ? `已清空 ${count} 条商品主图页面记录，资产库图片已保留` : '商品主图页面没有可清空的记录');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '商品主图记录清空失败');
+    } finally {
+      setClearingRecords(false);
+    }
+  };
+  const addToResourceLibrary = async () => {
+    if (!resourceTarget) return;
+    setResourceSaving(true);
+    try {
+      let targetCategoryId = resourceCategoryId;
+      if (resourceMode === 'new') {
+        const name = newCategoryName.trim();
+        if (!name) throw new Error('请输入新分类名称');
+        const existing = snapshot.resourceCategories.find((category) => category.name === name);
+        if (existing) targetCategoryId = existing.id;
+        else {
+          const category: ResourceCategory = { id: newId(), name, createdAt: new Date().toISOString() };
+          await window.imageStudio.saveResourceCategories([...snapshot.resourceCategories, category]);
+          targetCategoryId = category.id;
+        }
+      }
+      if (!targetCategoryId) throw new Error('请选择资源分类');
+      await window.imageStudio.addGenerationToResource(resourceTarget.id, targetCategoryId);
+      await onRefresh();
+      setResourceTarget(null);
+      onNotice('商品主图已加入资源库');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '加入资源库失败');
+    } finally {
+      setResourceSaving(false);
+    }
+  };
+
+  return <div className="product-main-page direct-main-page">
+    <div className="product-main-flow" aria-label="商品主图生成流程"><div className="active"><span>01</span><div><strong>换装白底图</strong><small>统一视觉参考</small></div></div><ArrowRight size={17} /><div className={prompts.length === 8 ? 'active' : ''}><span>02</span><div><strong>识别八组提示词</strong><small>{readyPromptCount} / 8 已就绪</small></div></div><ArrowRight size={17} /><div><span>03</span><div><strong>按所选尺寸生成</strong><small>{ratioLabel} · 八次独立请求</small></div></div></div>
+    <section className="product-main-stage direct-main-stage">
+      <header><div><span className="stage-number">商品主图批量生成</span><h2>一张白底图，生成八张商品主图</h2><p>识别八组提示词后，可选择预设画幅或直接输入自定义像素尺寸。</p></div><div className="stage-metric"><strong>{readyPromptCount}</strong><span>组提示词就绪</span></div></header>
+      <div className="direct-main-input-grid">
+        <div className="product-main-reference"><div className="section-label"><strong>换装后的白底图</strong><span>必填 · 1 张</span></div><button type="button" className={reference ? 'product-main-upload filled' : 'product-main-upload'} onClick={pickReference}>{reference ? <><LocalImage asset={reference} alt={reference.name} /><span className="replace-image"><RefreshCw size={15} />替换图片</span></> : <><ImagePlus size={34} /><strong>上传白底图</strong><span>支持直接粘贴图片</span></>}</button>{reference && <button type="button" className="text-button danger-text" onClick={() => updateProductMainDraft({ productMainReference: null })}><Trash2 size={15} />移除图片</button>}</div>
+        <div className="prompt-recognition-panel"><div className="section-label"><strong>整段主图提示词</strong><span>自动识别“主图 1～8”</span></div><textarea value={promptText} onChange={(event) => updateProductMainDraft({ productMainPromptText: event.target.value })} placeholder={'可直接粘贴完整提示词，或点击下方“AI 生成并识别”。\n\n主图 1：爆点首图 / 品牌主海报\n中文生图提示词：……\n\n主图 2：核心卖点图\n中文生图提示词：……\n\n依次到主图 8'} /><div className="prompt-recognition-actions"><span>当前文字服务：{activeTextService?.name ?? '未配置'}。AI 返回后仍可逐条编辑。</span><div><button type="button" className="secondary" disabled={!promptText.trim() || aiGenerating} onClick={recognizePrompts}><WandSparkles size={16} />识别已有文本</button><button type="button" className="primary" disabled={aiGenerating} onClick={() => void generatePromptsWithAi()}>{aiGenerating ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{aiGenerating ? 'AI 生成中' : 'AI 生成并识别'}</button></div></div></div>
+      </div>
+      <div className="recognized-prompts-heading"><div><h3>八张主图任务</h3><p>每条提示词对应一张主图和一次独立 API 请求，八张统一使用下方尺寸。</p></div><div><span className={readyPromptCount === 8 && prompts.length === 8 ? 'ready' : ''}>{readyPromptCount} / 8</span><button type="button" className="secondary" disabled={prompts.length >= 8} onClick={addPrompt}><Plus size={15} />补充一组</button><button type="button" className="text-button danger-text" disabled={prompts.length === 0} onClick={() => updateProductMainDraft({ productMainPrompts: [] })}><Trash2 size={14} />清空</button></div></div>
+      {prompts.length > 0 ? <div className="recognized-prompt-list">{prompts.map((item, index) => <article key={item.id}><div className="prompt-sequence">{String(index + 1).padStart(2, '0')}</div><div className="prompt-fields"><input value={item.title} onChange={(event) => updatePrompt(item.id, { title: event.target.value })} aria-label={`主图 ${index + 1} 标题`} placeholder={`主图 ${index + 1} 标题`} /><textarea value={item.prompt} onChange={(event) => updatePrompt(item.id, { prompt: event.target.value })} aria-label={`主图 ${index + 1} 提示词`} placeholder="这张主图的完整生图提示词" /></div><button type="button" className="icon-button danger-button" title="删除这组提示词" onClick={() => removePrompt(item.id)}><Trash2 size={15} /></button></article>)}</div> : <div className="product-main-empty compact"><WandSparkles size={27} /><strong>等待识别主图提示词</strong><span>粘贴整段文本后点击“识别提示词”。</span></div>}
+      <div className="direct-main-submit-bar"><div className="product-main-parameters"><label>批次前缀<input maxLength={48} value={batchPrefix} onChange={(event) => updateProductMainDraft({ productMainBatchPrefix: event.target.value })} /></label><label className="product-main-ratio-field">画幅尺寸<div><select value={customRatio ? '__custom__' : ratio} onChange={(event) => { const value = event.target.value; updateProductMainDraft({ productMainRatio: value === '__custom__' ? (customRatio ? ratio : ratioPreset?.size || '1024x1024') : value }); }}>{snapshot.settings.imageRatios.map((preset) => <option key={preset.id} value={preset.name}>{preset.name} · {preset.size}</option>)}<option value="__custom__">自定义像素</option></select>{customRatio && <input value={ratio} onChange={(event) => updateProductMainDraft({ productMainRatio: event.target.value })} placeholder="1280x720" aria-label="自定义主图像素尺寸" />}</div></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; updateProductMainDraft({ productMainResolution: value, productMainModel: modelForResolution(model, value) }); }}><option>1K</option><option>2K</option></select></label><label>模型<input value={model} onChange={(event) => updateProductMainDraft({ productMainModel: event.target.value })} /></label></div><button type="button" className="primary product-main-generate" disabled={submitting || pending > 0} onClick={generate}>{submitting || pending > 0 ? <LoaderCircle size={18} className="spin" /> : <Sparkles size={18} />}{pending > 0 ? `生成中 ${pending} / 8` : `生成八张 ${ratioLabel} 主图`}</button></div>
+      <div className="product-main-results-heading"><div><h3>商品主图结果</h3><span>每张结果可单独重试、预览或加入资源库；清空这里只隐藏本页记录。</span></div><div className="product-main-record-actions"><small>{records.filter((record) => record.status === 'success').length} 张完成</small><button type="button" className="secondary" disabled={clearingRecords || records.length === 0 || pending > 0} onClick={() => void clearPageRecords()}>{clearingRecords ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />}{clearingRecords ? '清空中' : '清空记录'}</button></div></div>
+      {records.length > 0 ? <div className="product-main-result-grid">{records.slice(0, 40).map((record) => { const resource = snapshot.assets.find((asset) => asset.isLibraryResource && asset.sourceGenerationId === record.id); const category = snapshot.resourceCategories.find((item) => item.id === resource?.resourceCategoryId); return <article key={record.id} className="product-main-result"><button type="button" className="product-main-result-image" style={{ aspectRatio: productMainAspectRatio(record.ratio, snapshot.settings) }} disabled={record.status !== 'success'} onClick={() => setPreviewRecord(record)}>{record.status === 'pending' ? <div className="generation-placeholder"><LoaderCircle size={28} className="spin" /><span>生成中</span></div> : record.status === 'success' ? <LocalImage path={record.outputPath} alt={record.taskName} /> : <div className="product-main-result-error"><CircleAlert size={24} /><span>生成失败</span></div>}</button><header><strong title={record.taskName}>{record.taskName}</strong><span>{record.ratio} · {record.resolution}</span></header>{record.status === 'success' ? <button type="button" className={resource ? 'secondary resource-added' : 'secondary'} disabled={Boolean(resource)} onClick={() => openResourceDialog(record)}>{resource ? <Check size={15} /> : <Archive size={15} />}{resource ? `已加入 ${category?.name ?? '资源库'}` : '加入资源库'}</button> : record.status === 'error' ? <RetryButton record={record} compact /> : <div className="result-pending-label">等待结果</div>}</article>; })}</div> : <div className="product-main-empty"><Image size={28} /><strong>还没有商品主图结果</strong><span>补齐八组提示词并选择尺寸后，一次生成八张主图。</span></div>}
+    </section>
+    {previewRecord && <ImagePreviewModal record={previewRecord} onClose={() => setPreviewRecord(null)} />}
+    {resourceTarget && <div className="category-editor-backdrop" role="dialog" aria-modal="true" aria-label="加入资源库" onMouseDown={(event) => event.target === event.currentTarget && !resourceSaving && setResourceTarget(null)}><form className="product-main-resource-dialog" onSubmit={(event) => { event.preventDefault(); void addToResourceLibrary(); }}><header><div><strong>加入资源库</strong><span>{resourceTarget.taskName}</span></div><button type="button" className="icon-button" title="关闭" disabled={resourceSaving} onClick={() => setResourceTarget(null)}><X size={18} /></button></header><div className="resource-mode-switch"><button type="button" className={resourceMode === 'existing' ? 'selected' : ''} onClick={() => setResourceMode('existing')}>选择已有分类</button><button type="button" className={resourceMode === 'new' ? 'selected' : ''} onClick={() => setResourceMode('new')}><Plus size={15} />新建分类</button></div>{resourceMode === 'existing' ? <label><span>资源分类</span><select value={resourceCategoryId} onChange={(event) => setResourceCategoryId(event.target.value)}>{snapshot.resourceCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label> : <label><span>新分类名称</span><input autoFocus maxLength={30} value={newCategoryName} onChange={(event) => setNewCategoryName(event.target.value)} placeholder="例如：合格商品主图" /></label>}<footer><button type="button" className="secondary" disabled={resourceSaving} onClick={() => setResourceTarget(null)}>取消</button><button type="submit" className="primary" disabled={resourceSaving || (resourceMode === 'existing' ? !resourceCategoryId : !newCategoryName.trim())}>{resourceSaving ? <LoaderCircle size={16} className="spin" /> : <Archive size={16} />}{resourceSaving ? '保存中' : '确认加入'}</button></footer></form></div>}
+  </div>;
+}
+
 function buildWorkbenchPrompt(group: TagGroup | undefined, subcategory: TagSubcategory | undefined, selections: Record<string, string>): string {
   return composePrompt({ dimensions: selections, direction: '正面', category: subcategory?.name ?? group?.name ?? '自由创作' }, group, subcategory);
 }
@@ -881,6 +1319,7 @@ function WorkbenchPage({
   onRefresh,
   onOpenSettings,
   onNotice,
+  onAssets,
 }: {
   snapshot: AppSnapshot;
   draft: DraftState;
@@ -888,6 +1327,7 @@ function WorkbenchPage({
   onRefresh: () => Promise<AppSnapshot>;
   onOpenSettings: () => void;
   onNotice: (message: string) => void;
+  onAssets: (assets: AssetRecord[]) => void;
 }) {
   const groups = snapshot.tagGroups;
   const [selectedGroupId, setSelectedGroupId] = useState(draft.workbenchGroupId || groups[0]?.id || '');
@@ -895,246 +1335,202 @@ function WorkbenchPage({
   const [selectedSubcategoryId, setSelectedSubcategoryId] = useState(draft.workbenchSubcategoryId || activeGroup?.subcategories[0]?.id || '');
   const activeSubcategory = activeGroup?.subcategories.find((subcategory) => subcategory.id === selectedSubcategoryId) ?? activeGroup?.subcategories[0];
   const categories = activeSubcategory?.dimensions ?? [];
-  const [selections, setSelections] = useState<Record<string, string>>(() => Object.keys(draft.workbenchSelections ?? {}).length > 0
-    ? { ...draft.workbenchSelections }
-    : Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => [category.name, category.tags[0].name])));
-  const [prompt, setPrompt] = useState(() => draft.workbenchFreeMode ? (draft.workbenchPrompt ?? '') : (draft.workbenchPrompt || buildWorkbenchPrompt(activeGroup, activeSubcategory, selections)));
-  const [references, setReferences] = useState<Array<{ asset: AssetRecord; x: number; y: number; linked: boolean }>>([]);
-  const [model, setModel] = useState(snapshot.settings.defaultModel);
-  const [ratio, setRatio] = useState('1:1');
-  const [resolution, setResolution] = useState('1K');
+  const defaultSelections = Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => [category.name, category.tags[0].name]));
+  const [selections, setSelections] = useState<Record<string, string>>(() => Object.keys(draft.workbenchSelections ?? {}).length > 0 ? { ...draft.workbenchSelections } : defaultSelections);
+  const [freeMode, setFreeMode] = useState(draft.workbenchFreeMode ?? true);
+  const createNode = (index: number, source?: WorkbenchGenerationNode): WorkbenchGenerationNode => ({
+    id: newId(),
+    name: source ? `${source.name} 副本` : `生成节点 ${index}`,
+    prompt: source ? source.prompt : freeMode ? '' : draft.workbenchPrompt || buildWorkbenchPrompt(activeGroup, activeSubcategory, selections),
+    model: source?.model ?? snapshot.settings.defaultModel,
+    ratio: source?.ratio ?? ratioNames(snapshot.settings)[0],
+    resolution: source?.resolution ?? '1K',
+    x: source ? source.x + 36 : 28 + ((index - 1) % 3) * 350,
+    y: source ? source.y + 36 : 28 + Math.floor((index - 1) / 3) * 500,
+    referenceAssetIds: source ? [...source.referenceAssetIds] : [],
+  });
+  const [nodes, setNodes] = useState<WorkbenchGenerationNode[]>(() => draft.workbenchNodes?.length ? draft.workbenchNodes : [createNode(1)]);
+  const [selectedNodeId, setSelectedNodeId] = useState(nodes[0]?.id ?? '');
+  const [addedAssets, setAddedAssets] = useState<AssetRecord[]>([]);
   const [running, setRunning] = useState(false);
-  const [localProgress, setLocalProgress] = useState<GenerationProgress | null>(null);
-  const [selectedRecordId, setSelectedRecordId] = useState('');
-  const [showResult, setShowResult] = useState(true);
   const [zoom, setZoom] = useState(1);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [previewRecord, setPreviewRecord] = useState<GenerationRecord | null>(null);
-  const [freeMode, setFreeMode] = useState(Boolean(draft.workbenchFreeMode));
-  const referenceDrag = useRef<null | { id: string; startX: number; startY: number; x: number; y: number }>(null);
+  const nodeDrag = useRef<null | { id: string; startX: number; startY: number; x: number; y: number }>(null);
+  const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? nodes[0];
+  const availableAssets = Array.from(new Map([...snapshot.assets, ...addedAssets].map((asset) => [asset.id, asset])).values());
+  const workbenchBatchPrefix = draft.workbenchBatchPrefix || '生图台';
 
-  const workbenchRecords = snapshot.generations.filter((record) => record.source === 'workbench').slice(0, 12);
-  const iterationRecords = workbenchRecords.filter((record) => record.status === 'success');
-  const pendingRecord = workbenchRecords.find((record) => record.status === 'pending');
-  const selectedRecord = showResult ? iterationRecords.find((record) => record.id === selectedRecordId) ?? iterationRecords[0] : undefined;
-  const updateWorkbenchDraft = (update: Partial<DraftState>) => onDraft({ ...draft, ...update });
-
-  useEffect(() => {
-    if (freeMode) return;
-    const next = Object.fromEntries(categories.filter((category) => category.tags[0]).map((category) => {
-      const existing = category.tags.some((tag) => tag.name === selections[category.name]) ? selections[category.name] : category.tags[0].name;
-      return [category.name, existing];
-    }));
-    const nextPrompt = buildWorkbenchPrompt(activeGroup, activeSubcategory, next);
-    setSelections(next);
-    setPrompt(nextPrompt);
-    updateWorkbenchDraft({ workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: next, workbenchPrompt: nextPrompt });
-  }, [activeSubcategory?.id, freeMode]);
-
-  useEffect(() => window.imageStudio.onGenerationProgress((progress) => {
-    if (running) setLocalProgress(progress);
-  }), [running]);
+  const persistNodes = (next: WorkbenchGenerationNode[]) => {
+    setNodes(next);
+    onDraft({ ...draft, workbenchFreeMode: freeMode, workbenchNodes: next, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: selections, workbenchPrompt: next.find((node) => node.id === selectedNodeId)?.prompt ?? '' });
+  };
+  const updateNode = (nodeId: string, update: Partial<WorkbenchGenerationNode>) => persistNodes(nodes.map((node) => node.id === nodeId ? { ...node, ...update } : node));
+  const addNode = (source?: WorkbenchGenerationNode) => {
+    const node = createNode(nodes.length + 1, source);
+    persistNodes([...nodes, node]);
+    setSelectedNodeId(node.id);
+  };
+  const removeNode = (nodeId: string) => {
+    if (nodes.length <= 1) return;
+    const next = nodes.filter((node) => node.id !== nodeId);
+    persistNodes(next);
+    if (selectedNodeId === nodeId) setSelectedNodeId(next[0].id);
+  };
 
   useEffect(() => {
     const move = (event: PointerEvent) => {
-      const drag = referenceDrag.current;
+      const drag = nodeDrag.current;
       if (!drag) return;
-      setReferences((current) => current.map((item) => item.asset.id === drag.id ? {
-        ...item,
-        x: Math.max(0, Math.min(980, drag.x + event.clientX - drag.startX)),
-        y: Math.max(0, Math.min(760, drag.y + event.clientY - drag.startY)),
-      } : item));
+      const next = nodes.map((node) => node.id === drag.id ? {
+        ...node,
+        x: Math.max(16, drag.x + (event.clientX - drag.startX) / zoom),
+        y: Math.max(16, drag.y + (event.clientY - drag.startY) / zoom),
+      } : node);
+      setNodes(next);
     };
-    const stop = () => { referenceDrag.current = null; };
+    const stop = () => {
+      if (!nodeDrag.current) return;
+      nodeDrag.current = null;
+      onDraft({ ...draft, workbenchNodes: nodes });
+    };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', stop);
     return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); };
-  }, []);
+  }, [nodes, zoom, draft]);
 
   const selectTag = (category: TagCategory, tagName: string) => {
-    if (freeMode) return;
-    const next = { ...selections, [category.name]: tagName };
-    const nextPrompt = buildWorkbenchPrompt(activeGroup, activeSubcategory, next);
-    setSelections(next);
-    setPrompt(nextPrompt);
-    updateWorkbenchDraft({ workbenchSelections: next, workbenchPrompt: nextPrompt });
+    if (freeMode || !selectedNode) return;
+    const nextSelections = { ...selections, [category.name]: tagName };
+    const nextPrompt = buildWorkbenchPrompt(activeGroup, activeSubcategory, nextSelections);
+    setSelections(nextSelections);
+    const nextNodes = nodes.map((node) => node.id === selectedNode.id ? { ...node, prompt: nextPrompt } : node);
+    setNodes(nextNodes);
+    onDraft({ ...draft, workbenchNodes: nextNodes, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: nextSelections, workbenchPrompt: nextPrompt });
   };
-
+  const changeGroup = (group: TagGroup) => {
+    if (freeMode) return;
+    const subcategory = group.subcategories[0];
+    setSelectedGroupId(group.id);
+    setSelectedSubcategoryId(subcategory?.id ?? '');
+    const nextSelections = Object.fromEntries((subcategory?.dimensions ?? []).filter((category) => category.tags[0]).map((category) => [category.name, category.tags[0].name]));
+    setSelections(nextSelections);
+    const nextNodes = selectedNode ? nodes.map((node) => node.id === selectedNode.id ? { ...node, prompt: buildWorkbenchPrompt(group, subcategory, nextSelections) } : node) : nodes;
+    setNodes(nextNodes);
+    onDraft({ ...draft, workbenchNodes: nextNodes, workbenchGroupId: group.id, workbenchSubcategoryId: subcategory?.id ?? '', workbenchSelections: nextSelections });
+  };
+  const changeSubcategory = (subcategory: TagSubcategory) => {
+    if (freeMode) return;
+    setSelectedSubcategoryId(subcategory.id);
+    const nextSelections = Object.fromEntries(subcategory.dimensions.filter((category) => category.tags[0]).map((category) => [category.name, category.tags[0].name]));
+    setSelections(nextSelections);
+    const nextNodes = selectedNode ? nodes.map((node) => node.id === selectedNode.id ? { ...node, prompt: buildWorkbenchPrompt(activeGroup, subcategory, nextSelections) } : node) : nodes;
+    setNodes(nextNodes);
+    onDraft({ ...draft, workbenchNodes: nextNodes, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: subcategory.id, workbenchSelections: nextSelections });
+  };
+  const changeRecipeMode = (nextFreeMode: boolean) => {
+    if (nextFreeMode === freeMode) return;
+    const nextPrompt = nextFreeMode ? selectedNode?.prompt ?? '' : buildWorkbenchPrompt(activeGroup, activeSubcategory, selections);
+    const nextNodes = selectedNode
+      ? nodes.map((node) => node.id === selectedNode.id ? { ...node, prompt: nextPrompt } : node)
+      : nodes;
+    setFreeMode(nextFreeMode);
+    setNodes(nextNodes);
+    onDraft({ ...draft, workbenchFreeMode: nextFreeMode, workbenchNodes: nextNodes, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: selections, workbenchPrompt: nextPrompt });
+  };
+  const addReferences = (assets: AssetRecord[]) => {
+    if (!selectedNode || assets.length === 0) return;
+    const ids = Array.from(new Set([...selectedNode.referenceAssetIds, ...assets.map((asset) => asset.id)]));
+    updateNode(selectedNode.id, { referenceAssetIds: ids });
+  };
   const pickReferences = async () => {
     const assets = await window.imageStudio.pickImages();
     if (assets.length === 0) return;
-    setReferences((current) => {
-      const existing = new Set(current.map((item) => item.asset.id));
-      const additions = assets.filter((asset) => !existing.has(asset.id)).map((asset, index) => ({
-        asset, x: 22 + ((current.length + index) % 4) * 148, y: 550 + Math.floor((current.length + index) / 4) * 142, linked: true,
-      }));
-      return [...current, ...additions].slice(0, 9);
-    });
+    setAddedAssets((current) => Array.from(new Map([...current, ...assets].map((asset) => [asset.id, asset])).values()));
+    onAssets(assets);
+    addReferences(assets);
   };
 
-  const generate = async (referenceOverride?: AssetRecord) => {
-    if (!prompt.trim()) {
-      onNotice('提示词不能为空');
-      return;
-    }
+  useImagePaste((asset) => {
+    setAddedAssets((current) => Array.from(new Map([...current, asset].map((item) => [item.id, item])).values()));
+    addReferences([asset]);
+    onNotice('已粘贴图片到当前节点');
+  }, onNotice);
+
+  const generateAll = async () => {
     if (!snapshot.settings.hasApiKey) {
       onNotice('请先配置 API Key');
       onOpenSettings();
       return;
     }
-    await window.imageStudio.saveDraft({ ...draft, workbenchFreeMode: freeMode, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: selections, workbenchPrompt: prompt });
-    const activeReferences = [...references.filter((item) => item.linked).map((item) => item.asset)];
-    if (referenceOverride && !activeReferences.some((asset) => asset.id === referenceOverride.id)) activeReferences.push(referenceOverride);
-    const slots = [activeReferences[0] ?? null, activeReferences[1] ?? null, activeReferences[2] ?? null];
-    const task: GenerationTask = {
-      id: newId(),
-      name: `生图台迭代 ${iterationRecords.length + 1}`,
-      tagGroupId: activeGroup?.id ?? '',
-      tagSubcategoryId: activeSubcategory?.id ?? '',
-      references: { garment: slots[0], side: slots[1], face: slots[2] },
-      detailAssets: activeReferences.slice(3),
-      dimensions: selections,
-      direction: '正面',
-      category: freeMode ? '自由生图' : activeSubcategory?.name ?? activeGroup?.name ?? '自由创作',
-      ratio,
-      resolution,
-      quantity: 1,
-      prompt: prompt.trim(),
-    };
+    const readyNodes = nodes.filter((node) => node.prompt.trim());
+    if (readyNodes.length !== nodes.length) {
+      onNotice('每个生成节点都需要填写提示词');
+      return;
+    }
+    const tasks: GenerationTask[] = readyNodes.map((node) => {
+      const references = node.referenceAssetIds.map((id) => availableAssets.find((asset) => asset.id === id)).filter((asset): asset is AssetRecord => Boolean(asset));
+      return {
+        id: node.id,
+        name: node.name,
+        tagGroupId: activeGroup?.id ?? '',
+        tagSubcategoryId: activeSubcategory?.id ?? '',
+        references: { garment: references[0] ?? null, side: references[1] ?? null, face: references[2] ?? null },
+        productAssets: references.filter((asset) => !asset.isLibraryResource),
+        resourceAssets: references.filter((asset) => asset.isLibraryResource),
+        detailAssets: references.slice(3),
+        dimensions: freeMode ? {} : selections,
+        direction: '正面',
+        category: freeMode ? '自由生图' : activeSubcategory?.name ?? activeGroup?.name ?? '自由创作',
+        ratio: node.ratio,
+        resolution: node.resolution,
+        quantity: 1,
+        prompt: node.prompt.trim(),
+        model: node.model,
+      };
+    });
     setRunning(true);
-    setLocalProgress({ batchId: '', completed: 0, total: 1, succeeded: 0, failed: 0 });
     try {
-      await window.imageStudio.startGeneration({
-        batchTag: `workbench-${Date.now()}`,
-        model,
-        source: 'workbench',
-        tasks: [task],
-      });
+      await window.imageStudio.startGeneration({ batchTag: workbenchBatchPrefix, model: snapshot.settings.defaultModel, source: 'workbench', tasks });
       await onRefresh();
-      setShowResult(true);
-      onNotice('任务已提交，正在后台异步生成');
+      onNotice(`已提交 ${tasks.length} 个生成节点`);
     } catch (error) {
       onNotice(error instanceof Error ? error.message : '生成失败');
-    } finally {
-      setRunning(false);
-    }
+    } finally { setRunning(false); }
   };
 
-  const iterate = async () => {
-    if (!selectedRecord) return;
-    try {
-      const asset = await window.imageStudio.useGenerationAsReference(selectedRecord.outputPath);
-       setReferences((current) => [...current.filter((item) => item.asset.id !== asset.id), { asset, x: 22, y: 550, linked: true }].slice(-9));
-       await generate(asset);
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : '无法读取迭代参考图');
-      setRunning(false);
-    }
-  };
-
-  return (
-    <div className="workbench-shell">
-      <aside className="recipe-panel">
-        <div className="recipe-heading">
-          <div><h2>创作配方</h2><p>{Object.keys(selections).length} 个维度已选择</p></div>
-          <span>自动替换</span>
-        </div>
-        <div className="recipe-options-scroll">
-          <button type="button" className={freeMode ? 'secondary wide selected recipe-free-mode' : 'secondary wide recipe-free-mode'} onClick={() => {
-            const nextFreeMode = !freeMode;
-            const nextPrompt = nextFreeMode ? '' : buildWorkbenchPrompt(activeGroup, activeSubcategory, {});
-            setFreeMode(nextFreeMode);
-            setSelections({});
-            setPrompt(nextPrompt);
-            updateWorkbenchDraft({ workbenchFreeMode: nextFreeMode, workbenchGroupId: activeGroup?.id ?? '', workbenchSubcategoryId: activeSubcategory?.id ?? '', workbenchSelections: {}, workbenchPrompt: nextPrompt });
-          }}><WandSparkles size={15} />自由生图固定模式</button>
-          <div className={freeMode ? 'recipe-groups disabled-selector' : 'recipe-groups'}>
-            {groups.map((group) => <button type="button" key={group.id} className={!freeMode && activeGroup?.id === group.id ? 'selected' : ''} disabled={freeMode} onClick={() => { const subcategoryId = group.subcategories[0]?.id ?? ''; setSelectedGroupId(group.id); setSelectedSubcategoryId(subcategoryId); updateWorkbenchDraft({ workbenchGroupId: group.id, workbenchSubcategoryId: subcategoryId }); }}>{group.name}</button>)}
-          </div>
-          <div className={freeMode ? 'recipe-subcategories disabled-selector' : 'recipe-subcategories'}>
-            {activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={!freeMode && activeSubcategory?.id === subcategory.id ? 'selected' : ''} disabled={freeMode} onClick={() => { setSelectedSubcategoryId(subcategory.id); updateWorkbenchDraft({ workbenchSubcategoryId: subcategory.id }); }}>{subcategory.name}</button>)}
-          </div>
-          <div className={freeMode ? 'recipe-scroll disabled-tags' : 'recipe-scroll'}>
-            {categories.map((category) => (
-              <section className="recipe-category" key={category.id}>
-                <header><strong>{category.name}</strong><span>{selections[category.name] || '未选择'}</span></header>
-                <div className="recipe-tags">
-                  {category.tags.map((tag) => (
-                    <button type="button" key={tag.id} className={selections[category.name] === tag.name ? 'selected' : ''} onClick={() => selectTag(category, tag.name)} title={tag.prompt}>
-                      {tag.name}
-                    </button>
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        </div>
-        <button type="button" className="primary recipe-generate" onClick={() => generate()} disabled={running}>
-          {running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}
-          {running ? '提交中' : '生成 1 张'}
-        </button>
-      </aside>
-
-      <main className="canvas-column">
-        <div className="canvas-toolbar">
-          <div>
-            <button type="button" className="secondary" onClick={pickReferences}><ImagePlus size={16} />添加参考图</button>
-            {references.length > 0 && <span className="reference-ready"><Check size={13} />已上传 {references.length} 张 · 已连接 {references.filter((item) => item.linked).length} 张</span>}
-          </div>
-          <div>
-            <button type="button" className="icon-button" title="缩小画布" onClick={() => setZoom((value) => Math.max(0.75, value - 0.125))}>-</button>
-            <span className="zoom-value">{Math.round(zoom * 100)}%</span>
-            <button type="button" className="icon-button" title="放大画布" onClick={() => setZoom((value) => Math.min(1.25, value + 0.125))}>+</button>
-            <button type="button" className="secondary" onClick={() => { setReferences([]); setSelectedRecordId(''); setShowResult(false); }}><RefreshCw size={15} />清空画布</button>
-          </div>
-        </div>
-        <div className="iteration-canvas">
-          <div className="canvas-stage" style={{ transform: `scale(${zoom})` }}>
-            <section className="canvas-node prompt-node">
-              <header><span>提示词</span><small>与左侧标签同步</small></header>
-              <textarea value={prompt} onChange={(event) => { setPrompt(event.target.value); updateWorkbenchDraft({ workbenchPrompt: event.target.value }); }} />
-              <div className="node-settings">
-                <label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
-                <label>画幅<select value={ratio} onChange={(event) => setRatio(event.target.value)}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label>
-                <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label>
-              </div>
-            </section>
-
-            {references.map((item) => <div key={item.asset.id} className={item.linked ? 'reference-node linked' : 'reference-node'} style={{ left: item.x, top: item.y }} onPointerDown={(event) => {
-              if ((event.target as HTMLElement).closest('button')) return;
-              event.preventDefault();
-              referenceDrag.current = { id: item.asset.id, startX: event.clientX, startY: event.clientY, x: item.x, y: item.y };
-            }}>
-              <div className="reference-node-toolbar"><button type="button" className={item.linked ? 'selected' : ''} onClick={(event) => { event.stopPropagation(); setReferences((current) => current.map((entry) => entry.asset.id === item.asset.id ? { ...entry, linked: !entry.linked } : entry)); }}>{item.linked ? '已连接' : '未连接'}</button><button type="button" onClick={(event) => { event.stopPropagation(); setReferences((current) => current.filter((entry) => entry.asset.id !== item.asset.id)); }}><X size={13} /></button></div>
-              <LocalImage asset={item.asset} alt={item.asset.name} /><span title={item.asset.name}>{item.asset.name}</span>
-            </div>)}
-
-            <div className="canvas-connector"><span /><ArrowRight size={18} /></div>
-
-            <section className="canvas-node result-node">
-              <header><span>生成结果</span><small>{iterationRecords.length} 次迭代</small></header>
-              {pendingRecord ? <div className="result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong><span>{pendingRecord.ratio} · {pendingRecord.resolution}</span></div> : selectedRecord ? <>
-                <div className="result-preview"><LocalImage path={selectedRecord.outputPath} alt={selectedRecord.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={() => setPreviewRecord(selectedRecord)}><Maximize2 size={16} /></button></div>
-                <div className="result-actions">
-                  <span>{selectedRecord.ratio} · {selectedRecord.model}</span>
-                  <button type="button" className="primary" onClick={iterate} disabled={running}><RefreshCw size={15} />继续迭代</button>
-                </div>
-              </> : <div className="result-empty"><ImagePlus size={24} /><span>等待首张图片</span></div>}
-            </section>
-
-            {iterationRecords.length > 0 && <section className="iteration-history">
-              <header><strong>迭代记录</strong><span>点击切换结果</span></header>
-              <div>{iterationRecords.map((record, index) => (
-                <button type="button" key={record.id} className={selectedRecord?.id === record.id ? 'selected' : ''} onClick={() => { setSelectedRecordId(record.id); setShowResult(true); }} title={`第 ${iterationRecords.length - index} 次迭代`}>
-                  <LocalImage path={record.outputPath} alt={record.taskName} /><span>{iterationRecords.length - index}</span>
-                </button>
-              ))}</div>
-            </section>}
-          </div>
-        </div>
-      </main>
-      {previewRecord && <ImagePreviewModal record={previewRecord} onClose={() => setPreviewRecord(null)} />}
-    </div>
-  );
+  const canvasHeight = Math.max(760, ...nodes.map((node) => node.y + 470));
+  return <div className="workbench-shell multi-node-workbench">
+    <aside className="recipe-panel">
+      <div className="recipe-heading"><div><h2>节点配方</h2><p>{selectedNode?.name ?? '未选择节点'} · {freeMode ? '自由生图' : '标签配方'}</p></div><span>{nodes.length} 个节点</span></div>
+      <div className="recipe-options-scroll">
+        <div className="recipe-mode-switch" aria-label="节点生成模式"><button type="button" className={freeMode ? 'selected' : ''} onClick={() => changeRecipeMode(true)}><WandSparkles size={14} />自由生图</button><button type="button" className={!freeMode ? 'selected' : ''} onClick={() => changeRecipeMode(false)}><Tag size={14} />标签配方</button></div>
+        <div className={freeMode ? 'recipe-groups disabled-selector' : 'recipe-groups'}>{groups.map((group) => <button type="button" key={group.id} className={!freeMode && activeGroup?.id === group.id ? 'selected' : ''} disabled={freeMode} onClick={() => changeGroup(group)}>{group.name}</button>)}</div>
+        <div className={freeMode ? 'recipe-subcategories disabled-selector' : 'recipe-subcategories'}>{activeGroup?.subcategories.map((subcategory) => <button type="button" key={subcategory.id} className={!freeMode && activeSubcategory?.id === subcategory.id ? 'selected' : ''} disabled={freeMode} onClick={() => changeSubcategory(subcategory)}>{subcategory.name}</button>)}</div>
+        <div className={freeMode ? 'recipe-scroll disabled-tags' : 'recipe-scroll'}>{categories.map((category) => <section className="recipe-category" key={category.id}><header><strong>{category.name}</strong><span>{selections[category.name] || '未选择'}</span></header><div className="recipe-tags">{category.tags.map((tag) => <button type="button" key={tag.id} className={selections[category.name] === tag.name ? 'selected' : ''} disabled={freeMode} onClick={() => selectTag(category, tag.name)} title={tag.prompt}>{tag.name}</button>)}</div></section>)}</div>
+      </div>
+      <button type="button" className="primary recipe-generate" disabled={running || nodes.length === 0} onClick={generateAll}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `生成全部（${nodes.length} 张）`}</button>
+    </aside>
+    <main className="canvas-column">
+      <div className="canvas-toolbar"><div><button type="button" className="primary" onClick={() => addNode()}><Plus size={16} />新建节点</button><button type="button" className="secondary" disabled={!selectedNode} onClick={pickReferences}><ImagePlus size={16} />上传参考图</button><button type="button" className="secondary" disabled={!selectedNode} onClick={() => setPickerOpen(true)}><Images size={16} />选择资源</button></div><div><label className="workbench-batch-prefix"><span>批次前缀</span><input maxLength={48} value={workbenchBatchPrefix} onChange={(event) => onDraft({ ...draft, workbenchBatchPrefix: event.target.value, workbenchNodes: nodes })} /></label><button type="button" className="icon-button" title="缩小画布" onClick={() => setZoom((value) => Math.max(0.65, value - 0.1))}>-</button><span className="zoom-value">{Math.round(zoom * 100)}%</span><button type="button" className="icon-button" title="放大画布" onClick={() => setZoom((value) => Math.min(1.2, value + 0.1))}>+</button></div></div>
+      <div className="iteration-canvas multi-node-canvas"><div className="multi-node-stage" style={{ transform: `scale(${zoom})`, height: canvasHeight }}>
+        {nodes.map((node) => {
+          const records = snapshot.generations.filter((record) => record.source === 'workbench' && record.taskId === node.id);
+          const record = records.find((item) => item.status === 'pending') ?? records[0];
+          const references = node.referenceAssetIds.map((id) => availableAssets.find((asset) => asset.id === id)).filter((asset): asset is AssetRecord => Boolean(asset));
+          return <section key={node.id} className={selectedNode?.id === node.id ? 'generation-canvas-node selected' : 'generation-canvas-node'} style={{ left: node.x, top: node.y }} onMouseDown={() => setSelectedNodeId(node.id)}>
+            <header onPointerDown={(event) => { if ((event.target as HTMLElement).closest('button,input')) return; nodeDrag.current = { id: node.id, startX: event.clientX, startY: event.clientY, x: node.x, y: node.y }; }}><input value={node.name} onChange={(event) => updateNode(node.id, { name: event.target.value })} aria-label="节点名称" /><div><button type="button" title="复制节点" onClick={() => addNode(node)}><Copy size={14} /></button><button type="button" title="删除节点" disabled={nodes.length <= 1} onClick={() => removeNode(node.id)}><Trash2 size={14} /></button></div></header>
+            <textarea value={node.prompt} onChange={(event) => updateNode(node.id, { prompt: event.target.value })} placeholder="输入该节点的生图提示词" />
+            <div className="node-reference-strip">{references.map((asset) => <span key={asset.id} title={asset.name}><LocalImage asset={asset} alt={asset.name} /><button type="button" title="移除参考图" onClick={() => updateNode(node.id, { referenceAssetIds: node.referenceAssetIds.filter((id) => id !== asset.id) })}><X size={10} /></button></span>)}{references.length === 0 && <small>未选择参考图</small>}</div>
+            <div className="node-settings"><label>模型<input value={node.model} onChange={(event) => updateNode(node.id, { model: event.target.value })} /></label><label>画幅<select value={node.ratio} onChange={(event) => updateNode(node.id, { ratio: event.target.value })}>{ratioNames(snapshot.settings).map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label><label>清晰度<select value={node.resolution} onChange={(event) => { const resolution = event.target.value; updateNode(node.id, { resolution, model: modelForResolution(node.model, resolution) }); }}><option>1K</option><option>2K</option></select></label></div>
+            <div className="node-result">{record?.status === 'pending' ? <div className="generation-placeholder"><LoaderCircle size={24} className="spin" /><span>生成中</span></div> : record?.status === 'success' ? <button type="button" onClick={() => setPreviewRecord(record)} title="查看生成结果"><LocalImage path={record.outputPath} alt={record.taskName} /><Maximize2 size={15} /></button> : record?.status === 'error' ? <div className="node-result-error"><CircleAlert size={18} /><span>{record.error}</span><RetryButton record={record} compact /></div> : <div className="node-result-empty"><ImagePlus size={20} /><span>等待生成</span></div>}</div>
+          </section>;
+        })}
+      </div></div>
+    </main>
+    {pickerOpen && selectedNode && <ResourcePickerModal assets={snapshot.assets} categories={snapshot.resourceCategories} selectedIds={selectedNode.referenceAssetIds.filter((id) => snapshot.assets.some((asset) => asset.id === id && asset.isLibraryResource))} onClose={() => setPickerOpen(false)} onConfirm={(assets) => { const nonLibraryIds = selectedNode.referenceAssetIds.filter((id) => !snapshot.assets.some((asset) => asset.id === id && asset.isLibraryResource)); updateNode(selectedNode.id, { referenceAssetIds: [...nonLibraryIds, ...assets.map((asset) => asset.id)] }); setPickerOpen(false); }} />}
+    {previewRecord && <ImagePreviewModal record={previewRecord} onClose={() => setPreviewRecord(null)} />}
+  </div>;
 }
 
 async function assetDataUrl(asset: AssetRecord): Promise<string> {
@@ -1324,6 +1720,9 @@ function StampPage({
   const pickLogo = async () => {
     const asset = await window.imageStudio.pickImage();
     if (!asset) return;
+    await applyLogo(asset);
+  };
+  const applyLogo = async (asset: AssetRecord) => {
     setLogo(asset);
     setProcessingLogo(true);
     try {
@@ -1336,6 +1735,15 @@ function StampPage({
       setProcessingLogo(false);
     }
   };
+  useImagePaste(async (asset) => {
+    if (!product) {
+      setProduct(asset);
+      onNotice('已粘贴产品图');
+      return;
+    }
+    await applyLogo(asset);
+    onNotice('已粘贴 Logo 图片');
+  }, onNotice);
   const toggleBackground = async (checked: boolean) => {
     setRemoveBackground(checked);
     if (!logo) return;
@@ -1402,7 +1810,7 @@ function StampPage({
 
   return (
     <div className="stamp-page">
-      <section className="tool-intro-card"><div><h2>精准产品贴标</h2><p>使用原 Logo 四角定位，生成前自动去除连通底色并保真纠正。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || processingLogo || !product || !logo} onClick={generate}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `开始生成 ${quantity} 张`}</button></section>
+      <section className="tool-intro-card"><div><h2>精准产品贴标</h2><p>使用原 Logo 四角定位，生成前自动去除连通底色并保真纠正。</p></div><label>批次前缀<input maxLength={48} value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || processingLogo || !product || !logo} onClick={generate}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `开始生成 ${quantity} 张`}</button></section>
       <div className="stamp-workspace">
         <div className="stamp-primary-column">
           <div className="stamp-editor-row">
@@ -1423,7 +1831,7 @@ function StampPage({
               </div>
             </main>
           </div>
-          {displayedRecord && <section className="standalone-result stamp-inline-result"><header><h3>生成结果</h3><span>{displayedRecord.batchPrefix}</span></header>{displayedRecord.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="secondary" onClick={() => window.imageStudio.revealFile(displayedRecord.outputPath)}><FolderOpen size={15} />定位文件</button></div> : <div className="standalone-result-empty"><CircleAlert size={24} /><span>{displayedRecord.error}</span></div>}</section>}
+          {displayedRecord && <section className="standalone-result stamp-inline-result"><header><h3>生成结果</h3><span>{displayedRecord.batchPrefix}</span></header>{displayedRecord.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="secondary" onClick={() => window.imageStudio.revealFile(displayedRecord.outputPath)}><FolderOpen size={15} />定位文件</button></div> : <div className="standalone-result-empty"><CircleAlert size={24} /><span>{displayedRecord.error}</span><RetryButton record={displayedRecord} /></div>}</section>}
         </div>
 
         <aside className="stamp-right-panel">
@@ -1516,6 +1924,10 @@ function DetailGeneratePage({
         .slice(0, 5),
     );
   };
+  useImagePaste((asset) => {
+    setProducts((current) => Array.from(new Map([...current, asset].map((item) => [item.id, item])).values()).slice(0, 5));
+    onNotice('已粘贴产品参考图');
+  }, onNotice);
   const buildBasePrompt = () =>
     `请为电商商品生成高质量详情页图片。平台：${platform}；地区：${region}；语言：${language}；视觉风格：${style}；目标人群：${audience || "普通电商消费者"}；价格定位：${positioning || "中高端"}。\n\n产品特点与信息：${description.trim()}\n\n${extra.trim() ? `补充要求：${extra.trim()}\n\n` : ""}必须严格保持参考产品图的款式、颜色、材质、结构、比例和关键细节一致，不虚构不存在的产品功能，不改变品牌和产品身份。画面适合${platform}电商详情页，文字排版清晰可读，避免乱码、无关 Logo、水印和 AI 瑕疵。`;
   const buildSectionPrompt = (number: string, instruction: string) =>
@@ -1625,6 +2037,7 @@ function DetailGeneratePage({
         <label>
           批次前缀
           <input
+            maxLength={48}
             value={batchTag}
             onChange={(event) => setBatchTag(event.target.value)}
           />
@@ -1840,6 +2253,23 @@ function DetailGeneratePage({
 const DEFAULT_3D_PROMPT =
   "100%还原服装细节和颜色，居中构图，正面视角。纯白色背景，专业摄影棚灯光，柔和阴影，干净的产品摄影风格，高端电商服饰展示。立体衣身结构清晰自然，面料纹理、厚薄、缝线、包边和装饰细节准确，高清纹理渲染，写实效果。不要模特、衣架、文字、Logo、水印和多余道具。";
 
+const DEFAULT_MODEL_PROCESSING_PROMPT =
+  "100%还原模特本人、面部特征、发型、肤色、身材比例、姿态和穿着服装，必须保留完整模特，不得移除、替换或改变人物。人物居中构图，保持原有服装款式、颜色、材质、图案和细节准确。纯白色背景，专业摄影棚灯光，柔和自然阴影，干净的高端电商模特摄影风格，高清写实。不要新增人物、改变动作、改变服装、文字、Logo、水印和多余道具。";
+
+const DEFAULT_BACKGROUND_PROCESSING_PROMPT =
+  "100%还原原图的场景结构、空间关系、色彩和光影，整理为干净、高清、可复用的电商场景背景。保持原有视角和构图，修复模糊与瑕疵，材质纹理真实自然。不要人物、商品、文字、Logo、水印和多余杂物。";
+
+const DEFAULT_GENERAL_PROCESSING_PROMPT =
+  "100%还原原图主体、颜色、结构、材质、比例和关键细节，保持主体完整并居中构图。优化为干净、高清、写实的专业电商摄影效果，光影自然，纹理清晰。不要擅自改变主体，不要新增文字、Logo、水印和多余道具。";
+
+function defaultResourceProcessingPrompt(asset: AssetRecord, categories: ResourceCategory[]): string {
+  const categoryName = categories.find((category) => category.id === asset.resourceCategoryId)?.name ?? '';
+  if (categoryName.includes('模特')) return DEFAULT_MODEL_PROCESSING_PROMPT;
+  if (categoryName.includes('背景') || categoryName.includes('场景')) return DEFAULT_BACKGROUND_PROCESSING_PROMPT;
+  if (categoryName.includes('服装') || categoryName.includes('商品')) return DEFAULT_3D_PROMPT;
+  return DEFAULT_GENERAL_PROCESSING_PROMPT;
+}
+
 function Garment3DPage({
   snapshot,
   onRefresh,
@@ -1865,6 +2295,10 @@ function Garment3DPage({
     const asset = await window.imageStudio.pickImage();
     if (asset) setGarment(asset);
   };
+  useImagePaste((asset) => {
+    setGarment(asset);
+    onNotice('已粘贴服装参考图');
+  }, onNotice);
   const generate = async () => {
     if (!garment) {
       onNotice('请先上传服装参考图');
@@ -1909,12 +2343,12 @@ function Garment3DPage({
 
   return (
     <div className="garment3d-page">
-      <section className="tool-intro-card"><div><h2>3D服装白底图</h2><p>将服装参考图生成正面、居中的立体商品展示图。</p></div><label>批次前缀<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || !garment} onClick={generate}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `生成 ${quantity} 张`}</button></section>
+      <section className="tool-intro-card"><div><h2>3D服装白底图</h2><p>将服装参考图生成正面、居中的立体商品展示图。</p></div><label>批次前缀<input maxLength={48} value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label><button type="button" className="primary" disabled={running || !garment} onClick={generate}>{running ? <LoaderCircle size={17} className="spin" /> : <Sparkles size={17} />}{running ? '提交中' : `生成 ${quantity} 张`}</button></section>
       <div className="garment3d-workspace">
         <section className="garment3d-reference"><header><h3>服装参考图</h3><p>上传正面服装图，模型只使用这张图还原颜色、版型、纹理和细节。</p></header><button type="button" className={garment ? 'garment3d-upload filled' : 'garment3d-upload'} onClick={pick}>{garment ? <LocalImage asset={garment} alt="3D服装参考图" /> : <><Plus size={28} /><span>上传服装图</span></>}</button>{garment && <button type="button" className="text-button danger-text" onClick={() => setGarment(null)}><Trash2 size={14} />移除图片</button>}</section>
         <section className="garment3d-settings"><header><h3>输出设置</h3></header><div className="garment3d-summary"><span>构图</span><strong>正面 · 居中 · 纯白背景</strong></div><div className="garment3d-summary"><span>分辨率</span><strong>{resolution} · {ratio}</strong></div><div className="garment3d-controls"><label>生图比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label><label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; setResolution(value); setModel((current) => modelForResolution(current, value)); }}><option>1K</option><option>2K</option></select></label><label>生成数量<input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} /></label></div><label className="garment3d-prompt"><strong>提示词</strong><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label></section>
       </div>
-      <section className="standalone-result garment3d-result"><header><h3>生成结果</h3>{displayedRecord && <span>{displayedRecord.batchPrefix}</span>}</header>{displayedRecord?.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord?.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={() => setPreviewRecord(displayedRecord)}><Maximize2 size={16} /></button></div> : <div className="standalone-result-empty"><ImagePlus size={24} /><span>上传服装图并确认提示词后开始生成</span></div>}</section>
+      <section className="standalone-result garment3d-result"><header><h3>生成结果</h3>{displayedRecord && <span>{displayedRecord.batchPrefix}</span>}</header>{displayedRecord?.status === 'pending' ? <div className="standalone-result-empty generation-placeholder"><LoaderCircle size={30} className="spin" /><strong>生成中</strong></div> : displayedRecord?.status === 'success' ? <div><LocalImage path={displayedRecord.outputPath} alt={displayedRecord.taskName} /><button type="button" className="image-expand-button" title="放大预览" onClick={() => setPreviewRecord(displayedRecord)}><Maximize2 size={16} /></button></div> : displayedRecord?.status === 'error' ? <div className="standalone-result-empty"><CircleAlert size={24} /><span>{displayedRecord.error}</span><RetryButton record={displayedRecord} /></div> : <div className="standalone-result-empty"><ImagePlus size={24} /><span>上传服装图并确认提示词后开始生成</span></div>}</section>
       {previewRecord && <ImagePreviewModal record={previewRecord} onClose={() => setPreviewRecord(null)} />}
     </div>
   );
@@ -1985,6 +2419,10 @@ function DetailPage({
     if (assets.length === 0) return;
     updateTask(taskId, (task) => ({ ...task, detailAssets: [...(task.detailAssets ?? []), ...assets].slice(0, 6) }));
   };
+  useImagePaste((asset) => {
+    saveTasks([...tasks, createDetailTask(tasks.length + 1, sharedPrompt, asset)]);
+    onNotice('已粘贴详情图并新增任务');
+  }, onNotice);
   const generate = async () => {
     const ready = tasks.filter((task) => task.references.garment);
     if (ready.length === 0) {
@@ -2022,7 +2460,7 @@ function DetailPage({
     <div className="detail-page">
       <section className="detail-toolbar">
         <div><h2>详情图区域替换</h2><p>批量上传旧详情页，在保持内容不变的前提下生成明显不同的新排版。</p></div>
-        <label>批次前缀<input value={batchTag} onChange={(event) => onDraft({ ...draft, detailBatchTag: event.target.value, detailSharedPrompt: sharedPrompt, detailTasks: tasks })} /></label>
+        <label>批次前缀<input maxLength={48} value={batchTag} onChange={(event) => onDraft({ ...draft, detailBatchTag: event.target.value, detailSharedPrompt: sharedPrompt, detailTasks: tasks })} /></label>
         <button type="button" className="secondary" onClick={batchAdd}><Images size={15} />批量添加详情图</button>
         <button type="button" className="secondary" onClick={addEmpty}><Plus size={15} />新增任务</button>
         <button type="button" className="primary" disabled={running || total === 0} onClick={generate}>{running ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{running ? '提交中' : `开始生成 ${total} 张`}</button>
@@ -2066,6 +2504,191 @@ function DetailPage({
       </div>
     </div>
   );
+}
+
+const SKU_BASE_PROMPT = `请生成一张高质量电商产品 SKU 选项图。
+
+如果提供了商品参考图，必须严格保持参考商品的品类、品牌身份、版型、结构、材质、工艺、图案、Logo 位置和整体比例，只改变本 SKU 明确指定的属性。如果没有提供商品参考图，则根据本 SKU 的商品属性、颜色、尺码和补充要求完整设计并准确呈现商品。不得混入其他 SKU 的颜色或特征。
+
+商品主体完整、居中、无遮挡，使用正面或最能准确识别该 SKU 的标准展示视角。背景干净简洁，专业摄影棚布光，颜色准确，材质纹理清晰，所有 SKU 图片保持统一构图、统一光线和统一缩放比例，方便消费者直接比较不同选项。
+
+不要模特、手、衣架、包装道具、无关文字、水印和额外商品。`;
+
+function createSkuVariant(): SkuVariant {
+  return { id: newId(), attribute: '', color: '', size: '', customPrompt: '' };
+}
+
+function skuVariantTitle(variant: SkuVariant, index: number): string {
+  return [variant.attribute, variant.color, variant.size].map((value) => value.trim()).filter(Boolean).join(' · ') || `SKU ${index + 1}`;
+}
+
+function buildSkuPrompt(variant: SkuVariant): string {
+  const values = [
+    variant.attribute.trim() ? `商品属性/款式：${variant.attribute.trim()}` : '',
+    variant.color.trim() ? `颜色：${variant.color.trim()}，必须准确呈现该颜色，不偏色` : '',
+    variant.size.trim() ? `尺码：${variant.size.trim()}，保持该尺码对应的真实比例和外观，不在画面中添加尺码文字` : '',
+  ].filter(Boolean).join('\n');
+  const custom = variant.customPrompt.trim();
+  return `${SKU_BASE_PROMPT}\n\n本张 SKU 信息：\n${values || '按照补充要求生成该 SKU。'}${custom ? `\n\n补充要求：${custom}` : ''}`;
+}
+
+function SkuPage({
+  snapshot,
+  draft,
+  onDraft,
+  onRefresh,
+  onOpenSettings,
+  onNotice,
+  onAssets,
+}: {
+  snapshot: AppSnapshot;
+  draft: DraftState;
+  onDraft: (draft: DraftState) => void;
+  onRefresh: () => Promise<AppSnapshot>;
+  onOpenSettings: () => void;
+  onNotice: (message: string) => void;
+  onAssets: (assets: AssetRecord[]) => void;
+}) {
+  const referenceAssets = draft.skuReferenceAssets ?? [];
+  const variants = draft.skuVariants?.length ? draft.skuVariants : [createSkuVariant()];
+  const batchTag = draft.skuBatchTag || 'sku';
+  const ratio = draft.skuRatio || ratioNames(snapshot.settings)[0];
+  const resolution = draft.skuResolution || '1K';
+  const model = draft.skuModel || snapshot.settings.defaultModel;
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const records = snapshot.generations.filter((record) => record.source === 'sku');
+  const pending = records.filter((record) => record.status === 'pending').length;
+
+  const updateSkuDraft = (update: Partial<DraftState>) => onDraft({
+    ...draft,
+    skuReferenceAssets: referenceAssets,
+    skuVariants: variants,
+    skuBatchTag: batchTag,
+    skuRatio: ratio,
+    skuResolution: resolution,
+    skuModel: model,
+    ...update,
+  });
+  const setReferenceAssets = (assets: AssetRecord[]) => updateSkuDraft({
+    skuReferenceAssets: Array.from(new Map(assets.map((asset) => [asset.id, asset])).values()).slice(0, 9),
+  });
+  const uploadReferences = async () => {
+    const assets = await window.imageStudio.pickImages();
+    if (assets.length === 0) return;
+    onAssets(assets);
+    const next = Array.from(new Map([...referenceAssets, ...assets].map((asset) => [asset.id, asset])).values()).slice(0, 9);
+    setReferenceAssets(next);
+    if (referenceAssets.length + assets.length > 9) onNotice('SKU 参考图最多保留 9 张');
+  };
+  useImagePaste((asset) => {
+    if (referenceAssets.length >= 9) {
+      onNotice('SKU 参考图最多保留 9 张');
+      return;
+    }
+    setReferenceAssets([...referenceAssets, asset]);
+    onNotice('已粘贴 1 张 SKU 参考图');
+  }, onNotice);
+  const updateVariant = (variantId: string, update: Partial<SkuVariant>) => updateSkuDraft({
+    skuVariants: variants.map((variant) => variant.id === variantId ? { ...variant, ...update } : variant),
+  });
+  const addVariant = (source?: SkuVariant) => updateSkuDraft({
+    skuVariants: [...variants, source
+      ? { ...source, id: newId() }
+      : createSkuVariant()],
+  });
+  const removeVariant = (variantId: string) => {
+    if (variants.length <= 1) return;
+    updateSkuDraft({ skuVariants: variants.filter((variant) => variant.id !== variantId) });
+  };
+  const generate = async () => {
+    const ready = variants.filter((variant) => variant.attribute.trim() || variant.color.trim() || variant.size.trim() || variant.customPrompt.trim());
+    if (ready.length !== variants.length) {
+      onNotice('每个 SKU 至少填写属性、颜色、尺码或自定义提示词中的一项');
+      return;
+    }
+    if (!snapshot.settings.hasApiKey) {
+      onNotice('请先配置 API Key');
+      onOpenSettings();
+      return;
+    }
+    const tasks: GenerationTask[] = ready.map((variant, index) => ({
+      id: variant.id,
+      name: skuVariantTitle(variant, index),
+      tagGroupId: '',
+      tagSubcategoryId: '',
+      references: {
+        garment: referenceAssets[0] ?? null,
+        side: referenceAssets[1] ?? null,
+        face: referenceAssets[2] ?? null,
+      },
+      productAssets: referenceAssets,
+      detailAssets: referenceAssets.slice(3),
+      dimensions: {
+        商品属性: variant.attribute.trim(),
+        颜色: variant.color.trim(),
+        尺码: variant.size.trim(),
+      },
+      direction: 'SKU主图',
+      category: '产品SKU图',
+      ratio,
+      resolution,
+      quantity: 1,
+      model: modelForResolution(model, resolution),
+      prompt: buildSkuPrompt(variant),
+    }));
+    setRunning(true);
+    try {
+      await window.imageStudio.startGeneration({ batchTag, model, source: 'sku', tasks });
+      await onRefresh();
+      onNotice(`已提交 ${tasks.length} 个 SKU 主图任务`);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : 'SKU 主图任务提交失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+  const selectLibraryAssets = (assets: AssetRecord[]) => {
+    const uploaded = referenceAssets.filter((asset) => !asset.isLibraryResource);
+    if (uploaded.length + assets.length > 9) onNotice('SKU 参考图最多保留 9 张');
+    setReferenceAssets([...uploaded, ...assets]);
+    setPickerOpen(false);
+  };
+
+  return <div className="sku-page">
+    <section className="sku-toolbar">
+      <div><h2>SKU主图批量生成</h2><p>{variants.length} 个 SKU · {referenceAssets.length} 张参考图</p></div>
+      <label>批次前缀<input maxLength={48} value={batchTag} onChange={(event) => updateSkuDraft({ skuBatchTag: event.target.value })} /></label>
+      <label>图片比例<select value={ratio} onChange={(event) => updateSkuDraft({ skuRatio: event.target.value })}>{ratioNames(snapshot.settings).map((value) => <option key={value}>{value}</option>)}</select></label>
+      <label>清晰度<select value={resolution} onChange={(event) => { const value = event.target.value; updateSkuDraft({ skuResolution: value, skuModel: modelForResolution(model, value) }); }}><option>1K</option><option>2K</option></select></label>
+      <label>生成模型<input value={model} onChange={(event) => updateSkuDraft({ skuModel: event.target.value })} /></label>
+      <button type="button" className="primary" disabled={running || pending > 0} onClick={generate}>{running || pending > 0 ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{pending > 0 ? `生成中 ${pending}` : `生成 ${variants.length} 张`}</button>
+    </section>
+    <div className="sku-layout">
+      <main className="sku-editor">
+        <section className="sku-reference-section">
+          <header><div><h3>商品参考图（可选）</h3><span>上传后用于保持商品结构和细节；不上传时按 SKU 信息与提示词生成</span></div><small>{referenceAssets.length}/9</small></header>
+          <MultiAssetField label="商品图 / 细节图" assets={referenceAssets} onUpload={uploadReferences} onOpenLibrary={() => setPickerOpen(true)} onRemove={(assetId) => setReferenceAssets(referenceAssets.filter((asset) => asset.id !== assetId))} uploadLabel="上传" />
+        </section>
+        <section className="sku-variants-section">
+          <header><div><h3>SKU属性列表</h3><span>每行生成一张对应选项图</span></div><button type="button" className="secondary" onClick={() => addVariant()}><Plus size={15} />新增 SKU</button></header>
+          <div className="sku-variant-list">{variants.map((variant, index) => <article className="sku-variant-row" key={variant.id}>
+            <header><strong>{String(index + 1).padStart(2, '0')}</strong><span>{skuVariantTitle(variant, index)}</span><div><button type="button" className="icon-button" title="复制 SKU" onClick={() => addVariant(variant)}><Copy size={14} /></button><button type="button" className="icon-button danger-button" title="删除 SKU" disabled={variants.length <= 1} onClick={() => removeVariant(variant.id)}><Trash2 size={14} /></button></div></header>
+            <div className="sku-attribute-grid"><label>商品属性 / 款式<input value={variant.attribute} onChange={(event) => updateVariant(variant.id, { attribute: event.target.value })} placeholder="例如：圆领、长袖、礼盒款" /></label><label>颜色<input value={variant.color} onChange={(event) => updateVariant(variant.id, { color: event.target.value })} placeholder="例如：酒红色" /></label><label>尺码<input value={variant.size} onChange={(event) => updateVariant(variant.id, { size: event.target.value })} placeholder="例如：XL、42码" /></label></div>
+            <label className="sku-custom-prompt">自定义提示词<textarea value={variant.customPrompt} onChange={(event) => updateVariant(variant.id, { customPrompt: event.target.value })} placeholder="补充该 SKU 的构图、背景、展示角度或材质要求" /></label>
+          </article>)}</div>
+        </section>
+      </main>
+      <aside className="sku-results-panel">
+        <header><div><h3>SKU生成结果</h3><span>{records.filter((record) => record.status === 'success').length} 张已完成</span></div><button type="button" className="secondary" onClick={() => window.imageStudio.openOutputDirectory()}><FolderOpen size={14} />打开目录</button></header>
+        <div className="sku-result-list">{variants.map((variant, index) => {
+          const variantRecords = records.filter((record) => record.taskId === variant.id).slice(0, 4);
+          return <article className="sku-result-item" key={variant.id}><header><strong>{skuVariantTitle(variant, index)}</strong><span>{variantRecords[0]?.status === 'pending' ? '生成中' : variantRecords[0]?.status === 'success' ? '已完成' : variantRecords[0]?.status === 'error' ? '失败' : '等待生成'}</span></header>{variantRecords.length > 0 ? <TaskResults records={variantRecords} /> : <div className="sku-result-empty"><Package size={22} /><span>等待生成该 SKU 图片</span></div>}</article>;
+        })}</div>
+      </aside>
+    </div>
+    {pickerOpen && <ResourcePickerModal assets={snapshot.assets} categories={snapshot.resourceCategories} selectedIds={referenceAssets.filter((asset) => asset.isLibraryResource).map((asset) => asset.id)} onClose={() => setPickerOpen(false)} onConfirm={selectLibraryAssets} />}
+  </div>;
 }
 
 function TemplatesPage({
@@ -2164,7 +2787,7 @@ function TemplatesPage({
           <label>预设名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：服饰正侧面商拍" /></label>
           <label>大分类<select value={group?.id ?? ''} onChange={(event) => changeGroup(event.target.value)}>{snapshot.tagGroups.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
           <label>小分类<select value={subcategory?.id ?? ''} onChange={(event) => changeSubcategory(event.target.value)}>{group?.subcategories.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-          <label>批次标签<input value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label>
+          <label>批次前缀<input maxLength={48} value={batchTag} onChange={(event) => setBatchTag(event.target.value)} /></label>
         </div>
         <div className="preset-editor-body">
           <section className="preset-faces">
@@ -2363,6 +2986,183 @@ function TagsPage({ groups, onSave }: { groups: TagGroup[]; onSave: (groups: Tag
   </div>;
 }
 
+function ResourcesPage({ snapshot, onRefresh, onOpenSettings, onNotice }: { snapshot: AppSnapshot; onRefresh: () => Promise<AppSnapshot>; onOpenSettings: () => void; onNotice: (message: string) => void }) {
+  const [selectedCategoryId, setSelectedCategoryId] = useState(snapshot.resourceCategories[0]?.id ?? '');
+  const [query, setQuery] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [submittingProcessingAssets, setSubmittingProcessingAssets] = useState<Set<string>>(() => new Set());
+  const [promptEditor, setPromptEditor] = useState<{ asset: AssetRecord; prompt: string } | null>(null);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [categoryEditor, setCategoryEditor] = useState<{ mode: 'add' | 'rename'; name: string } | null>(null);
+  const categories = snapshot.resourceCategories;
+  const selectedCategory = categories.find((category) => category.id === selectedCategoryId) ?? categories[0];
+  const resources = snapshot.assets.filter((asset) => asset.isLibraryResource);
+  const visible = resources.filter((asset) => (!selectedCategory || asset.resourceCategoryId === selectedCategory.id)
+    && (!query.trim() || asset.name.toLowerCase().includes(query.trim().toLowerCase())));
+
+  useEffect(() => {
+    if (!categories.some((category) => category.id === selectedCategoryId)) setSelectedCategoryId(categories[0]?.id ?? '');
+  }, [categories, selectedCategoryId]);
+
+  const saveCategories = async (next: ResourceCategory[]) => {
+    await window.imageStudio.saveResourceCategories(next);
+    await onRefresh();
+  };
+  const saveCategoryEditor = async () => {
+    if (!categoryEditor) return;
+    const name = categoryEditor.name.trim();
+    if (!name) {
+      onNotice('分类名称不能为空');
+      return;
+    }
+    if (categories.some((category) => category.name === name && (categoryEditor.mode === 'add' || category.id !== selectedCategory?.id))) {
+      onNotice('分类名称已存在');
+      return;
+    }
+    setCategorySaving(true);
+    try {
+      if (categoryEditor.mode === 'add') {
+        const category = { id: newId(), name, createdAt: new Date().toISOString() };
+        await saveCategories([...categories, category]);
+        setSelectedCategoryId(category.id);
+        onNotice('分类已新增');
+      } else if (selectedCategory && name !== selectedCategory.name) {
+        await saveCategories(categories.map((category) => category.id === selectedCategory.id ? { ...category, name } : category));
+        onNotice('分类已重命名');
+      }
+      setCategoryEditor(null);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '分类保存失败');
+    } finally {
+      setCategorySaving(false);
+    }
+  };
+  const removeCategory = async () => {
+    if (!selectedCategory || categories.length <= 1) return;
+    if (!window.confirm(`删除分类“${selectedCategory.name}”？分类内资源会移动到第一个保留分类。`)) return;
+    const next = categories.filter((category) => category.id !== selectedCategory.id);
+    await saveCategories(next);
+    setSelectedCategoryId(next[0]?.id ?? '');
+  };
+  const upload = async () => {
+    if (!selectedCategory) return;
+    setBusy(true);
+    try {
+      const assets = await window.imageStudio.pickResourceImages(selectedCategory.id);
+      if (assets.length > 0) {
+        await onRefresh();
+        onNotice(`已上传 ${assets.length} 个资源`);
+      }
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '资源上传失败');
+    } finally { setBusy(false); }
+  };
+  const updateResource = async (assetId: string, update: { name?: string; resourceCategoryId?: string; resourceProcessingPrompt?: string }) => {
+    await window.imageStudio.updateResource(assetId, update);
+    await onRefresh();
+  };
+  const removeResource = async (asset: AssetRecord) => {
+    if (!window.confirm(`彻底删除资源“${asset.name}”？`)) return;
+    await window.imageStudio.deleteImages([asset.localPath]);
+    await onRefresh();
+  };
+  const saveProcessingPrompt = async () => {
+    if (!promptEditor) return;
+    const prompt = promptEditor.prompt.trim();
+    if (!prompt) {
+      onNotice('处理提示词不能为空');
+      return;
+    }
+    setPromptSaving(true);
+    try {
+      await updateResource(promptEditor.asset.id, { resourceProcessingPrompt: prompt });
+      setPromptEditor(null);
+      onNotice('图片处理提示词已保存');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '提示词保存失败');
+    } finally {
+      setPromptSaving(false);
+    }
+  };
+  const processResource = async (asset: AssetRecord) => {
+    if (!snapshot.settings.hasApiKey) {
+      onNotice('请先配置 API Key');
+      onOpenSettings();
+      return;
+    }
+    setSubmittingProcessingAssets((current) => new Set(current).add(asset.id));
+    const ratio = snapshot.settings.imageRatios.some((preset) => preset.name === '1:1') ? '1:1' : snapshot.settings.imageRatios[0]?.name;
+    try {
+      if (!ratio) throw new Error('请先在设置中配置生图比例');
+      const task: GenerationTask = {
+        id: newId(),
+        name: `${asset.name} · 图片处理`,
+        tagGroupId: '',
+        tagSubcategoryId: '',
+        references: { garment: asset, side: null, face: null },
+        resourceAssets: [asset],
+        dimensions: {},
+        direction: '正面',
+        category: categories.find((category) => category.id === asset.resourceCategoryId)?.name ?? '资源图片处理',
+        ratio,
+        resolution: '1K',
+        quantity: 1,
+        prompt: asset.resourceProcessingPrompt?.trim() || defaultResourceProcessingPrompt(asset, categories),
+        model: snapshot.settings.defaultModel,
+        resourceReplacementAssetId: asset.id,
+      };
+      await window.imageStudio.startGeneration({ batchTag: '资源处理', model: snapshot.settings.defaultModel, source: 'resource', tasks: [task] });
+      await onRefresh();
+      onNotice('图片处理任务已提交，成功后会自动替换原图');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '图片处理任务提交失败');
+    } finally {
+      setSubmittingProcessingAssets((current) => {
+        const next = new Set(current);
+        next.delete(asset.id);
+        return next;
+      });
+    }
+  };
+
+  return <div className="resources-page">
+    <aside className="resource-category-panel">
+      <header><strong>分类</strong><div><button type="button" className="icon-button" title="新增分类" onClick={() => setCategoryEditor({ mode: 'add', name: '' })}><Plus size={15} /></button><button type="button" className="icon-button" title="重命名分类" disabled={!selectedCategory} onClick={() => selectedCategory && setCategoryEditor({ mode: 'rename', name: selectedCategory.name })}><Pencil size={14} /></button><button type="button" className="icon-button danger-button" title="删除分类" disabled={categories.length <= 1} onClick={removeCategory}><Trash2 size={14} /></button></div></header>
+      <div>{categories.map((category) => <button type="button" className={selectedCategory?.id === category.id ? 'selected' : ''} key={category.id} onClick={() => setSelectedCategoryId(category.id)}><span>{category.name}</span><small>{resources.filter((asset) => asset.resourceCategoryId === category.id).length}</small></button>)}</div>
+    </aside>
+    <main className="resource-library-main">
+      <div className="resource-toolbar"><label><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资源名称" /></label><button type="button" className="primary" disabled={busy || !selectedCategory} onClick={upload}>{busy ? <LoaderCircle size={16} className="spin" /> : <ImagePlus size={16} />}上传图片</button></div>
+      <div className="resource-library-summary"><strong>{selectedCategory?.name ?? '资源'}</strong><span>{visible.length} 项</span></div>
+      {visible.length > 0 ? <div className="resource-library-grid">{visible.map((asset) => {
+        const processingRecord = snapshot.generations.find((record) => record.taskSnapshot?.resourceReplacementAssetId === asset.id);
+        const processing = submittingProcessingAssets.has(asset.id) || processingRecord?.status === 'pending';
+        return <article key={asset.id}>
+          <div className="resource-image"><LocalImage asset={asset} alt={asset.name} /></div>
+          <input defaultValue={asset.name} aria-label="资源名称" onBlur={(event) => { const value = event.target.value.trim(); if (value && value !== asset.name) void updateResource(asset.id, { name: value }); }} />
+          <div className="resource-processing-actions"><button type="button" disabled={processing} onClick={() => processResource(asset)}>{processing ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}{processing ? '处理中' : '处理图片'}</button><button type="button" disabled={processing} onClick={() => setPromptEditor({ asset, prompt: asset.resourceProcessingPrompt?.trim() || defaultResourceProcessingPrompt(asset, categories) })}><Pencil size={13} />修改提示词</button></div>
+          {processingRecord?.status === 'error' && <small className="resource-processing-error" title={processingRecord.error}>{processingRecord.error}</small>}
+          <footer><select value={asset.resourceCategoryId} onChange={(event) => void updateResource(asset.id, { resourceCategoryId: event.target.value })}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><button type="button" className="icon-button danger-button" title="删除资源" onClick={() => removeResource(asset)}><Trash2 size={14} /></button></footer>
+        </article>;
+      })}</div> : <EmptyState icon={Images} title="暂无资源" action="点击上传图片添加到当前分类" />}
+    </main>
+    {categoryEditor && <div className="category-editor-backdrop" role="dialog" aria-modal="true" aria-label={categoryEditor.mode === 'add' ? '新增分类' : '重命名分类'} onMouseDown={(event) => event.target === event.currentTarget && !categorySaving && setCategoryEditor(null)}>
+      <form className="category-editor-dialog" onSubmit={(event) => { event.preventDefault(); void saveCategoryEditor(); }}>
+        <header><div><strong>{categoryEditor.mode === 'add' ? '新增分类' : '重命名分类'}</strong><span>分类名称</span></div><button type="button" className="icon-button" title="关闭" disabled={categorySaving} onClick={() => setCategoryEditor(null)}><X size={17} /></button></header>
+        <label><input autoFocus maxLength={30} value={categoryEditor.name} onChange={(event) => setCategoryEditor({ ...categoryEditor, name: event.target.value })} placeholder="例如：场景素材" /></label>
+        <footer><button type="button" className="secondary" disabled={categorySaving} onClick={() => setCategoryEditor(null)}>取消</button><button type="submit" className="primary" disabled={categorySaving || !categoryEditor.name.trim()}>{categorySaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{categorySaving ? '保存中' : '保存'}</button></footer>
+      </form>
+    </div>}
+    {promptEditor && <div className="category-editor-backdrop" role="dialog" aria-modal="true" aria-label="修改图片处理提示词" onMouseDown={(event) => event.target === event.currentTarget && !promptSaving && setPromptEditor(null)}>
+      <form className="resource-prompt-dialog" onSubmit={(event) => { event.preventDefault(); void saveProcessingPrompt(); }}>
+        <header><div><strong>修改处理提示词</strong><span>{promptEditor.asset.name}</span></div><button type="button" className="icon-button" title="关闭" disabled={promptSaving} onClick={() => setPromptEditor(null)}><X size={17} /></button></header>
+        <label><span>图片处理提示词</span><textarea autoFocus value={promptEditor.prompt} onChange={(event) => setPromptEditor({ ...promptEditor, prompt: event.target.value })} /></label>
+        <footer><button type="button" className="secondary" disabled={promptSaving} onClick={() => setPromptEditor({ ...promptEditor, prompt: defaultResourceProcessingPrompt(promptEditor.asset, categories) })}><RefreshCw size={14} />分类默认</button><span /><button type="button" className="secondary" disabled={promptSaving} onClick={() => setPromptEditor(null)}>取消</button><button type="submit" className="primary" disabled={promptSaving || !promptEditor.prompt.trim()}>{promptSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{promptSaving ? '保存中' : '保存'}</button></footer>
+      </form>
+    </div>}
+  </div>;
+}
+
 function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
   const [source, setSource] = useState<'all' | GenerationRecord['source']>('all');
   const [model, setModel] = useState('all');
@@ -2394,11 +3194,14 @@ function AssetsPage({ generations }: { generations: GenerationRecord[] }) {
     { value: 'single', label: '单图' },
     { value: 'batch', label: '多批次' },
     { value: 'template', label: '模板队列' },
+    { value: 'product-main', label: '商品主图' },
     { value: 'workbench', label: '工作台' },
     { value: 'stamp', label: '贴标' },
     { value: 'garment3d', label: '3D白底' },
+    { value: 'resource', label: '资源处理' },
     { value: 'detail-generate', label: '详情页生成' },
     { value: 'detail', label: '详情页' },
+    { value: 'sku', label: 'SKU主图' },
   ];
   const previewIndex = preview ? filtered.findIndex((record) => record.id === preview.id) : -1;
   const showPrevious = () => {
@@ -2518,7 +3321,7 @@ function BatchesPage({ snapshot, onRefresh, onNotice }: { snapshot: AppSnapshot;
           {snapshot.batches.map((batch) => <tr key={batch.id}><td><strong>{batch.tag}</strong><small>{batch.id.slice(0, 8)}</small></td><td><span className={`table-status ${batch.status}`}>{batch.status === 'completed' ? '已完成' : '进行中'}</span></td><td>{batch.completed}/{batch.total}</td><td className="success-text">{batch.succeeded}</td><td className={batch.failed ? 'error-text' : ''}>{batch.failed}</td><td>{formatDate(batch.createdAt)}</td><td><button type="button" className="icon-button batch-row-delete" title={batch.status === 'running' ? '进行中的批次不能删除' : '删除批次记录'} disabled={deleting || batch.status === 'running'} onClick={() => deleteOne(batch.id, batch.tag)}><Trash2 size={15} /></button></td></tr>)}
         </tbody></table></div>
       )}
-      {errors.length > 0 && <section className="error-log"><h2>最近失败</h2>{errors.slice(0, 5).map((item) => <div key={item.id}><CircleAlert size={15} /><span><strong>{item.taskName}</strong>{item.error}</span><time>{formatDate(item.createdAt)}</time></div>)}</section>}
+      {errors.length > 0 && <section className="error-log"><h2>最近失败</h2>{errors.slice(0, 5).map((item) => <div key={item.id}><CircleAlert size={15} /><span><strong>{item.taskName}</strong>{item.error}</span><time>{formatDate(item.createdAt)}</time><RetryButton record={item} compact /></div>)}</section>}
     </div>
   );
 }
@@ -2529,22 +3332,27 @@ function SettingsPage({
   outputDirectory,
   configFile,
   onSaved,
+  onOutputChanged,
 }: {
   settings: PublicSettings;
   workspaceDirectory: string;
   outputDirectory: string;
   configFile: string;
   onSaved: (settings: PublicSettings) => void;
+  onOutputChanged: (outputDirectory: string) => void;
 }) {
   const [form, setForm] = useState<SettingsInput>(() => ({
     defaultModel: settings.defaultModel,
     invocationMode: settings.invocationMode,
     activeServiceId: settings.activeServiceId,
     services: settings.services.map((service) => ({ ...service, apiKey: '' })),
+    activeTextServiceId: settings.activeTextServiceId,
+    textServices: settings.textServices.map((service) => ({ ...service, apiKey: '' })),
     imageRatios: settings.imageRatios.map((preset) => ({ ...preset })),
   }));
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  const [movingOutput, setMovingOutput] = useState(false);
   const updateService = (id: string, update: Partial<SettingsInput['services'][number]>) => {
     setForm((current) => ({ ...current, services: current.services.map((service) => service.id === id ? { ...service, ...update } : service) }));
   };
@@ -2561,6 +3369,24 @@ function SettingsPage({
       if (current.services.length <= 1) return current;
       const services = current.services.filter((service) => service.id !== id);
       return { ...current, services, activeServiceId: current.activeServiceId === id ? services[0].id : current.activeServiceId };
+    });
+  };
+  const updateTextService = (id: string, update: Partial<SettingsInput['textServices'][number]>) => {
+    setForm((current) => ({ ...current, textServices: current.textServices.map((service) => service.id === id ? { ...service, ...update } : service) }));
+  };
+  const addTextService = () => {
+    const id = newId();
+    setForm((current) => ({
+      ...current,
+      activeTextServiceId: id,
+      textServices: [...current.textServices, { id, name: `AI文字服务 ${current.textServices.length + 1}`, baseUrl: '', model: 'gpt-4.1-mini', apiKey: '' }],
+    }));
+  };
+  const removeTextService = (id: string) => {
+    setForm((current) => {
+      if (current.textServices.length <= 1) return current;
+      const textServices = current.textServices.filter((service) => service.id !== id);
+      return { ...current, textServices, activeTextServiceId: current.activeTextServiceId === id ? textServices[0].id : current.activeTextServiceId };
     });
   };
   const addRatio = () => {
@@ -2581,6 +3407,11 @@ function SettingsPage({
       setFormError('请为每个生图服务填写名称，以及以 http:// 或 https:// 开头的 API 地址');
       return;
     }
+    const invalidTextService = form.textServices.find((service) => !service.name.trim() || !service.model.trim() || !/^https?:\/\//i.test(service.baseUrl.trim()));
+    if (invalidTextService) {
+      setFormError('请为每个 AI 文字服务填写名称、模型，以及以 http:// 或 https:// 开头的 API 地址');
+      return;
+    }
     const invalidRatio = form.imageRatios.find((preset) => !preset.name.trim() || !/^[1-9]\d*[x×][1-9]\d*$/i.test(preset.size.trim()));
     if (invalidRatio || new Set(form.imageRatios.map((preset) => preset.name.trim())).size !== form.imageRatios.length) {
       setFormError('比例名称不能重复，实际参数必须使用“宽x高”格式，例如 1280x720');
@@ -2596,6 +3427,8 @@ function SettingsPage({
         invocationMode: result.invocationMode,
         activeServiceId: result.activeServiceId,
         services: result.services.map((service) => ({ ...service, apiKey: '' })),
+        activeTextServiceId: result.activeTextServiceId,
+        textServices: result.textServices.map((service) => ({ ...service, apiKey: '' })),
         imageRatios: result.imageRatios.map((preset) => ({ ...preset })),
       });
     } catch (error) {
@@ -2603,6 +3436,16 @@ function SettingsPage({
     } finally {
       setSaving(false);
     }
+  };
+  const chooseOutputDirectory = async () => {
+    setMovingOutput(true);
+    setFormError('');
+    try {
+      const directory = await window.imageStudio.chooseOutputDirectory();
+      onOutputChanged(directory);
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : '输出目录迁移失败');
+    } finally { setMovingOutput(false); }
   };
   return (
     <div className="settings-page">
@@ -2627,6 +3470,25 @@ function SettingsPage({
         </div>
       </section>
       <section className="settings-section">
+        <div className="settings-heading"><div className="settings-icon"><WandSparkles size={18} /></div><div><h2>AI 文字服务</h2><p>用于识别商品图并生成八组主图提示词，接口采用 OpenAI 兼容格式</p></div></div>
+        <div className="settings-form">
+          <label>当前文字服务<select value={form.activeTextServiceId} onChange={(event) => setForm({ ...form, activeTextServiceId: event.target.value })}>{form.textServices.map((service) => <option key={service.id} value={service.id}>{service.name || '未命名服务'}</option>)}</select></label>
+          <div className="service-list text-service-list">
+            {form.textServices.map((service, index) => {
+              const saved = settings.textServices.find((item) => item.id === service.id);
+              return <article key={service.id} className={form.activeTextServiceId === service.id ? 'service-card active' : 'service-card'}>
+                <header><strong>{service.name || `AI文字服务 ${index + 1}`}</strong><div><button type="button" className="text-button" onClick={() => setForm({ ...form, activeTextServiceId: service.id })}>{form.activeTextServiceId === service.id ? '当前使用' : '设为当前'}</button><button type="button" className="icon-button" title="删除文字服务" disabled={form.textServices.length <= 1} onClick={() => removeTextService(service.id)}><Trash2 size={14} /></button></div></header>
+                <label>服务名称<input value={service.name} onChange={(event) => updateTextService(service.id, { name: event.target.value })} placeholder="例如：默认AI文字服务" /></label>
+                <label>API 地址<input value={service.baseUrl} onChange={(event) => updateTextService(service.id, { baseUrl: event.target.value })} placeholder="https://example.com/v1" /></label>
+                <label>文字模型<input value={service.model} onChange={(event) => updateTextService(service.id, { model: event.target.value })} placeholder="例如：gpt-4.1-mini" /></label>
+                <label>API Key<input type="password" autoComplete="off" value={service.apiKey ?? ''} onChange={(event) => updateTextService(service.id, { apiKey: event.target.value })} placeholder={saved?.hasApiKey ? '已安全保存，留空则不修改' : '输入 API Key'} /></label>
+              </article>;
+            })}
+          </div>
+          <button type="button" className="secondary add-setting-item" onClick={addTextService}><Plus size={15} />添加 AI 文字服务</button>
+        </div>
+      </section>
+      <section className="settings-section">
         <div className="settings-heading"><div className="settings-icon"><Maximize2 size={18} /></div><div><h2>生图比例</h2><p>名称用于界面显示，实际参数会作为 API 请求的 size 发送</p></div></div>
         <div className="settings-form">
           <div className="ratio-preset-list">
@@ -2647,7 +3509,7 @@ function SettingsPage({
           <label>应用数据目录<input value={workspaceDirectory} readOnly /></label>
           <label>图片输出目录<input value={outputDirectory} readOnly /></label>
           <label>配置文件<input value={configFile} readOnly /></label>
-          <button type="button" className="secondary open-workspace" onClick={() => window.imageStudio.openWorkspaceDirectory()}><FolderOpen size={16} />打开工作目录</button>
+          <div className="path-actions"><button type="button" className="secondary" disabled={movingOutput} onClick={chooseOutputDirectory}>{movingOutput ? <LoaderCircle size={16} className="spin" /> : <FolderOpen size={16} />}{movingOutput ? '迁移中' : '更改输出目录'}</button><button type="button" className="secondary open-workspace" onClick={() => window.imageStudio.openWorkspaceDirectory()}><FolderOpen size={16} />打开工作目录</button></div>
         </div>
       </section>
       <section className="local-note"><Check size={18} /><div><h3>本地优先</h3><p>草稿、参考图、生成结果与历史记录保存在本机；应用不包含账号系统或统计上报。</p></div></section>
@@ -2742,7 +3604,7 @@ export default function App() {
   const updateDraft = (next: DraftState) => setSnapshot((current) => ({ ...current, draft: next }));
   const visibleTasks = useMemo(() => {
     if (draft.mode === 'single') return draft.tasks.slice(0, 1);
-    if (draft.mode === 'template') return draft.tasks.filter((task) => Boolean(task.references.garment));
+    if (draft.mode === 'template') return draft.tasks.filter((task) => (task.productAssets?.length ?? 0) > 0 || Boolean(task.references.garment));
     return draft.tasks;
   }, [draft]);
   const generate = async () => {
@@ -2772,6 +3634,7 @@ export default function App() {
           const sharedSide = preset ? preset.sharedSide ?? null : draft.queueShared.side;
           if (!sharedFront) return [];
           const references = { ...task.references, sharedFront, sharedSide };
+          const resourceAssets = Array.from(new Map([...(task.resourceAssets ?? []), ...(draft.queueSharedResources ?? [])].map((asset) => [asset.id, asset])).values());
           const fixedDimensions = preset?.dimensions ?? task.dimensions;
           const directions = [
             { name: '正面', direction: 'front' as const, ratios: normalizedGenerationRatios(output.frontRatios, output.frontRatio) },
@@ -2792,6 +3655,7 @@ export default function App() {
               quantity: 1,
               dimensions,
               references,
+              resourceAssets,
               prompt: '',
             };
             const defaultBasePrompt = composePrompt({ ...task, dimensions: fixedDimensions }, group, subcategory);
@@ -2894,17 +3758,20 @@ export default function App() {
       <div className="app-main">
         <Topbar page={page} settings={snapshot.settings} onSettings={() => setPage('settings')} mode={draft.mode} onMode={changeStudioMode} />
         <div className="page-body">
-          {page === 'studio' && <StudioPage snapshot={snapshot} draft={draft} progress={progress} generating={generating} onDraft={updateDraft} onGenerate={generate} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
-          {page === 'workbench' && <WorkbenchPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
+          {page === 'studio' && <StudioPage snapshot={snapshot} draft={draft} progress={progress} generating={generating} onDraft={updateDraft} onGenerate={generate} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} onNotice={setNotice} />}
+          {page === 'product-main' && <ProductMainPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
+          {page === 'workbench' && <WorkbenchPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAssets={(assets) => setSnapshot((current) => ({ ...current, assets: [...assets, ...current.assets.filter((asset) => !assets.some((addition) => addition.id === asset.id))] }))} />}
           {page === 'templates' && <TemplatesPage snapshot={snapshot} draft={draft} onSave={saveTemplates} onApply={applyTemplate} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
+          {page === 'resources' && <ResourcesPage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'assets' && <AssetsPage generations={snapshot.generations} />}
           {page === 'stamp' && <StampPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'garment3d' && <Garment3DPage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'detail-generate' && <DetailGeneratePage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
           {page === 'detail' && <DetailPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
+          {page === 'sku' && <SkuPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAssets={(assets) => setSnapshot((current) => ({ ...current, assets: [...assets, ...current.assets.filter((asset) => !assets.some((addition) => addition.id === asset.id))] }))} />}
           {page === 'tags' && <TagsPage groups={snapshot.tagGroups} onSave={saveTags} />}
           {page === 'batches' && <BatchesPage snapshot={snapshot} onRefresh={refresh} onNotice={setNotice} />}
-          {page === 'settings' && <SettingsPage settings={snapshot.settings} workspaceDirectory={snapshot.workspaceDirectory} outputDirectory={snapshot.outputDirectory} configFile={snapshot.configFile} onSaved={(settings) => { setSnapshot((current) => ({ ...current, settings, draft: { ...current.draft, model: modelForInvocation(current.draft.model, settings.invocationMode), tasks: current.draft.tasks.map((task) => ({ ...task, model: modelForInvocation(task.model || current.draft.model, settings.invocationMode) })) } })); setNotice('设置已保存'); }} />}
+          {page === 'settings' && <SettingsPage settings={snapshot.settings} workspaceDirectory={snapshot.workspaceDirectory} outputDirectory={snapshot.outputDirectory} configFile={snapshot.configFile} onSaved={(settings) => { setSnapshot((current) => ({ ...current, settings, draft: { ...current.draft, model: modelForInvocation(current.draft.model, settings.invocationMode), skuModel: modelForInvocation(current.draft.skuModel || settings.defaultModel, settings.invocationMode), productMainModel: modelForInvocation(current.draft.productMainModel || settings.defaultModel, settings.invocationMode), tasks: current.draft.tasks.map((task) => ({ ...task, model: modelForInvocation(task.model || current.draft.model, settings.invocationMode) })) } })); setNotice('设置已保存'); }} onOutputChanged={(outputDirectory) => { setSnapshot((current) => ({ ...current, outputDirectory })); setNotice('图片输出目录已更新，旧图片已迁移'); }} />}
         </div>
       </div>
       {notice && <div className="toast"><Check size={16} />{notice}</div>}

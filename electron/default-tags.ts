@@ -7,6 +7,7 @@ const DIMENSIONS: Array<[string, TagSeed[]]> = [
     ['电商主图', '适合电商首页的高点击商品主图，主体突出，信息层级清晰'],
     ['详情页场景图', '适合商品详情页的真实使用场景图，兼顾人物与商品卖点'],
     ['品牌海报', '高质感品牌宣传海报，大面积留白，视觉焦点明确'],
+    ['模特换衣', '参考上传的服装图和模特图，把服装图换到模特图身上'],
   ]],
   ['展示方式', [
     ['全身展示', '模特从头到脚完整入镜，商品版型与上身效果清晰可见'],
@@ -78,7 +79,7 @@ function createDimensions(prefix: string, modelPrompt: string): TagCategory[] {
     tags: tags.map(([tagName, prompt], tagIndex) => ({
       id: `${prefix}-${dimensionIndex + 1}-${tagIndex + 1}`,
       name: tagName,
-      prompt: name === '图片类型' ? `${modelPrompt}。${prompt}` : prompt,
+      prompt: name === '图片类型' && tagName !== '模特换衣' ? `${modelPrompt}。${prompt}` : prompt,
     })),
   }));
 }

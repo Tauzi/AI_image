@@ -11,10 +11,12 @@ import type {
   ImageRatioPreset,
   PromptTemplate,
   PublicSettings,
+  ResourceCategory,
   SettingsInput,
   StoredImageService,
   StoredSettings,
   StoredState,
+  StoredTextService,
   TagCategory,
   TagGroup,
 } from './types';
@@ -23,10 +25,18 @@ import { createDefaultTagGroups } from './default-tags';
 const DEFAULT_MODEL = 'gpt-image-2-async';
 const DEFAULT_SERVICE_ID = 'default-image-service';
 const DEFAULT_SERVICE_URL = 'https://mianyunai.com/v1';
+const DEFAULT_TEXT_SERVICE_ID = 'default-text-service';
+const DEFAULT_TEXT_MODEL = 'gpt-4.1-mini';
 const DEFAULT_IMAGE_RATIOS: ImageRatioPreset[] = [
   { id: 'ratio-square', name: '1:1', size: '1024x1024' },
   { id: 'ratio-portrait', name: '3:4', size: '768x1024' },
   { id: 'ratio-tall', name: '9:16', size: '576x1024' },
+];
+const DEFAULT_RESOURCE_CATEGORIES: Array<Pick<ResourceCategory, 'id' | 'name'>> = [
+  { id: 'resource-model', name: '模特' },
+  { id: 'resource-background', name: '背景' },
+  { id: 'resource-product', name: '商品/服装' },
+  { id: 'resource-other', name: '其他' },
 ];
 const LEGACY_SHARED_DIMENSIONS = ['图片类型', '展示方式', '模特类型', '动作', '核心卖点', '适用场景', '背景', '视觉风格', '文案排版'];
 
@@ -66,7 +76,7 @@ function normalizeImageRatios(value: unknown): ImageRatioPreset[] {
   return normalized;
 }
 
-function saveApiKey(service: StoredImageService, apiKey: string): void {
+function saveApiKey(service: StoredImageService | StoredTextService, apiKey: string): void {
   if (safeStorage.isEncryptionAvailable()) {
     service.apiKeyProtected = safeStorage.encryptString(apiKey).toString('base64');
     service.apiKeyPlain = '';
@@ -76,7 +86,7 @@ function saveApiKey(service: StoredImageService, apiKey: string): void {
   }
 }
 
-function readApiKey(service: StoredImageService): string {
+function readApiKey(service: StoredImageService | StoredTextService): string {
   if (!service.apiKeyProtected) return service.apiKeyPlain;
   try {
     return safeStorage.decryptString(Buffer.from(service.apiKeyProtected, 'base64'));
@@ -186,9 +196,35 @@ function defaultTagCategories(): TagCategory[] {
   }));
 }
 
-function defaultState(): StoredState {
+function createDefaultResourceCategories(): ResourceCategory[] {
+  const createdAt = new Date().toISOString();
+  return DEFAULT_RESOURCE_CATEGORIES.map((category) => ({ ...category, createdAt }));
+}
+
+function addWardrobeChangeTag(groups: TagGroup[], defaults: TagGroup[]): TagGroup[] {
+  const defaultGroup = defaults.find((group) => group.id === 'standard-model');
+  if (!defaultGroup) return groups;
+  return groups.map((group) => group.id !== 'standard-model' ? group : {
+    ...group,
+    subcategories: group.subcategories.map((subcategory) => {
+      const defaultSubcategory = defaultGroup.subcategories.find((candidate) => candidate.id === subcategory.id);
+      const defaultTag = defaultSubcategory?.dimensions.find((dimension) => dimension.name === '图片类型')
+        ?.tags.find((tag) => tag.name === '模特换衣');
+      if (!defaultTag) return subcategory;
+      return {
+        ...subcategory,
+        dimensions: subcategory.dimensions.map((dimension) => dimension.name !== '图片类型'
+          || dimension.tags.some((tag) => tag.name === '模特换衣')
+          ? dimension
+          : { ...dimension, tags: [...dimension.tags, { ...defaultTag }] }),
+      };
+    }),
+  });
+}
+
+function defaultState(outputDirectory: string): StoredState {
   return {
-    version: 2,
+    version: 6,
     settings: {
       defaultModel: DEFAULT_MODEL,
       invocationMode: 'async',
@@ -197,6 +233,15 @@ function defaultState(): StoredState {
         id: DEFAULT_SERVICE_ID,
         name: '默认生图服务',
         baseUrl: DEFAULT_SERVICE_URL,
+        apiKeyProtected: '',
+        apiKeyPlain: '',
+      }],
+      activeTextServiceId: DEFAULT_TEXT_SERVICE_ID,
+      textServices: [{
+        id: DEFAULT_TEXT_SERVICE_ID,
+        name: '默认AI文字服务',
+        baseUrl: DEFAULT_SERVICE_URL,
+        model: DEFAULT_TEXT_MODEL,
         apiKeyProtected: '',
         apiKeyPlain: '',
       }],
@@ -220,6 +265,8 @@ function defaultState(): StoredState {
       },
     ],
     tagGroups: createDefaultTagGroups(),
+    resourceCategories: createDefaultResourceCategories(),
+    outputDirectory,
     draft: {
       mode: 'batch',
       batchTag: 'multi',
@@ -233,11 +280,27 @@ function defaultState(): StoredState {
       detailBatchTag: 'relayout',
       outputRatios: ['3:4'],
       stampPrompt: '',
-      workbenchFreeMode: false,
+      workbenchFreeMode: true,
       workbenchGroupId: '',
       workbenchSubcategoryId: '',
       workbenchPrompt: '',
       workbenchSelections: {},
+      workbenchBatchPrefix: '生图台',
+      skuReferenceAssets: [],
+      skuVariants: [{ id: randomUUID(), attribute: '', color: '', size: '', customPrompt: '' }],
+      skuBatchTag: 'sku',
+      skuRatio: '1:1',
+      skuResolution: '1K',
+      skuModel: DEFAULT_MODEL,
+      productMainReference: null,
+      productMainRequirement: '保持商品款式、颜色、材质、结构和品牌细节准确，主体完整清晰，构图适合电商平台主图，背景干净，光线自然专业，不添加无关文字、Logo、水印或道具。',
+      productMainTypes: ['正面展示'],
+      productMainBatchPrefix: '商品主图',
+      productMainResolution: '1K',
+      productMainModel: DEFAULT_MODEL,
+      productMainRatio: '1:1',
+      productMainPromptText: '',
+      productMainPrompts: [],
     },
   };
 }
@@ -258,29 +321,35 @@ function mimeFromExtension(filePath: string): string {
 export class LocalStore {
   private readonly root: string;
   readonly assetDirectory: string;
-  readonly outputDirectory: string;
+  private outputRoot: string;
   private readonly statePath: string;
   private state: StoredState;
 
   constructor() {
     this.root = app.getPath('userData');
     this.assetDirectory = path.join(this.root, 'assets');
-    this.outputDirectory = path.join(this.root, 'outputs');
+    this.outputRoot = path.join(this.root, 'outputs');
     this.statePath = path.join(this.root, 'workspace.json');
     fs.mkdirSync(this.assetDirectory, { recursive: true });
-    fs.mkdirSync(this.outputDirectory, { recursive: true });
     this.state = this.load();
+    this.outputRoot = this.state.outputDirectory;
+    fs.mkdirSync(this.outputRoot, { recursive: true });
     this.persist();
   }
 
+  get outputDirectory(): string {
+    return this.outputRoot;
+  }
+
   private load(): StoredState {
-    if (!fs.existsSync(this.statePath)) return defaultState();
+    if (!fs.existsSync(this.statePath)) return defaultState(this.outputRoot);
     try {
       const parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as Partial<StoredState>;
-      const fallback = defaultState();
-      const tagGroups = parsed.version === 2 && Array.isArray(parsed.tagGroups) && parsed.tagGroups.length > 0
+      const fallback = defaultState(this.outputRoot);
+      let tagGroups = Number(parsed.version) >= 2 && Array.isArray(parsed.tagGroups) && parsed.tagGroups.length > 0
         ? normalizeTagGroups(parsed.tagGroups as LegacyTagGroup[], fallback.tagGroups)
         : fallback.tagGroups;
+      if (Number(parsed.version) < 5) tagGroups = addWardrobeChangeTag(tagGroups, fallback.tagGroups);
       const parsedSettings = parsed.settings as Partial<StoredSettings> | undefined;
       const legacyProtected = parsedSettings?.apiKeyProtected ?? '';
       const legacyPlain = parsedSettings?.apiKeyPlain ?? '';
@@ -300,15 +369,37 @@ export class LocalStore {
             apiKeyProtected: legacyProtected,
             apiKeyPlain: legacyPlain,
           }];
+      const parsedTextServices = Array.isArray(parsedSettings?.textServices) ? parsedSettings.textServices : [];
+      const textServices: StoredTextService[] = parsedTextServices.length > 0
+        ? parsedTextServices.map((service, index) => ({
+            id: service.id || `text-service-${index + 1}`,
+            name: service.name?.trim() || `AI文字服务 ${index + 1}`,
+            baseUrl: normalizeBaseUrl(service.baseUrl || DEFAULT_SERVICE_URL),
+            model: service.model?.trim() || DEFAULT_TEXT_MODEL,
+            apiKeyProtected: service.apiKeyProtected || '',
+            apiKeyPlain: service.apiKeyPlain || '',
+          }))
+        : [{
+            id: DEFAULT_TEXT_SERVICE_ID,
+            name: '默认AI文字服务',
+            baseUrl: DEFAULT_SERVICE_URL,
+            model: DEFAULT_TEXT_MODEL,
+            apiKeyProtected: '',
+            apiKeyPlain: '',
+          }];
       const imageRatios = normalizeImageRatios(parsedSettings?.imageRatios);
       const settings: StoredSettings = {
         ...fallback.settings,
         ...parsedSettings,
         services,
+        textServices,
         imageRatios,
         activeServiceId: services.some((service) => service.id === parsedSettings?.activeServiceId)
           ? parsedSettings!.activeServiceId!
           : services[0].id,
+        activeTextServiceId: textServices.some((service) => service.id === parsedSettings?.activeTextServiceId)
+          ? parsedSettings!.activeTextServiceId!
+          : textServices[0].id,
       };
       delete settings.apiKeyProtected;
       delete settings.apiKeyPlain;
@@ -322,6 +413,7 @@ export class LocalStore {
         queueShared: { ...fallback.draft.queueShared, ...parsed.draft?.queueShared },
         queueOutput: { ...fallback.draft.queueOutput, ...parsed.draft?.queueOutput },
       };
+      if (Number(parsed.version) < 4) draft.workbenchFreeMode = true;
       const generations = Array.isArray(parsed.generations) ? parsed.generations.map((record) => {
         const normalized = {
           ...record,
@@ -344,33 +436,107 @@ export class LocalStore {
       draft.queueOutput.frontRatios = [draft.queueOutput.frontRatio];
       draft.queueOutput.sideRatios = [draft.queueOutput.sideRatio];
       draft.outputRatios = [imageRatios.some((preset) => preset.name === draft.outputRatios?.[0]) ? draft.outputRatios![0] : imageRatios[1]?.name ?? imageRatios[0].name];
+      const normalizeTaskAssets = (task: DraftState['tasks'][number]) => ({
+        ...task,
+        productAssets: Array.isArray(task.productAssets)
+          ? task.productAssets
+          : [task.references?.garment, task.references?.side].filter((asset): asset is AssetRecord => Boolean(asset)),
+        resourceAssets: Array.isArray(task.resourceAssets)
+          ? task.resourceAssets
+          : [task.references?.face].filter((asset): asset is AssetRecord => Boolean(asset)),
+      });
       draft.tasks = Array.isArray(draft.tasks)
         ? draft.tasks.map((task) => {
             const group = tagGroups.find((item) => item.id === task.tagGroupId) ?? tagGroups[0];
             const subcategory = group?.subcategories.find((item) => item.id === task.tagSubcategoryId) ?? group?.subcategories[0];
-            return {
+            return normalizeTaskAssets({
               ...task,
               tagGroupId: group?.id || '',
               tagSubcategoryId: subcategory?.id || '',
               ratio: imageRatios.some((preset) => preset.name === task.ratio) ? task.ratio : imageRatios[0].name,
               resolution: ['1K', '2K'].includes(task.resolution) ? task.resolution : task.resolution === '2K' || task.resolution === '4K' ? '2K' : '1K',
-            };
+            });
           })
         : [];
+      draft.detailTasks = Array.isArray(draft.detailTasks) ? draft.detailTasks.map(normalizeTaskAssets) : [];
+      draft.queueSharedResources = Array.isArray(draft.queueSharedResources) ? draft.queueSharedResources : [];
+      draft.skuReferenceAssets = Array.isArray(draft.skuReferenceAssets) ? draft.skuReferenceAssets : [];
+      draft.skuVariants = Array.isArray(draft.skuVariants) && draft.skuVariants.length > 0
+        ? draft.skuVariants.map((variant) => ({
+            id: variant.id || randomUUID(),
+            attribute: typeof variant.attribute === 'string' ? variant.attribute : '',
+            color: typeof variant.color === 'string' ? variant.color : '',
+            size: typeof variant.size === 'string' ? variant.size : '',
+            customPrompt: typeof variant.customPrompt === 'string' ? variant.customPrompt : '',
+          }))
+        : fallback.draft.skuVariants;
+      draft.skuBatchTag = typeof draft.skuBatchTag === 'string' && draft.skuBatchTag.trim() ? draft.skuBatchTag : 'sku';
+      draft.skuRatio = imageRatios.some((preset) => preset.name === draft.skuRatio) ? draft.skuRatio : imageRatios[0].name;
+      draft.skuResolution = ['1K', '2K'].includes(draft.skuResolution ?? '') ? draft.skuResolution : '1K';
+      draft.skuModel = typeof draft.skuModel === 'string' && draft.skuModel.trim()
+        ? modelForInvocation(draft.skuModel, settings.invocationMode)
+        : settings.defaultModel;
+      draft.productMainReference = draft.productMainReference && typeof draft.productMainReference === 'object'
+        ? draft.productMainReference
+        : null;
+      draft.productMainRequirement = typeof draft.productMainRequirement === 'string'
+        ? draft.productMainRequirement
+        : fallback.draft.productMainRequirement;
+      draft.productMainTypes = Array.isArray(draft.productMainTypes) && draft.productMainTypes.length > 0
+        ? draft.productMainTypes.filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+        : fallback.draft.productMainTypes;
+      draft.productMainBatchPrefix = typeof draft.productMainBatchPrefix === 'string' && draft.productMainBatchPrefix.trim()
+        ? draft.productMainBatchPrefix
+        : '商品主图';
+      draft.productMainResolution = ['1K', '2K'].includes(draft.productMainResolution ?? '') ? draft.productMainResolution : '1K';
+      draft.productMainModel = typeof draft.productMainModel === 'string' && draft.productMainModel.trim()
+        ? modelForInvocation(draft.productMainModel, settings.invocationMode)
+        : settings.defaultModel;
+      draft.productMainRatio = typeof draft.productMainRatio === 'string'
+        && (imageRatios.some((preset) => preset.name === draft.productMainRatio) || /^[1-9]\d*[x×][1-9]\d*$/i.test(draft.productMainRatio.trim()))
+        ? draft.productMainRatio.trim().replace('×', 'x')
+        : imageRatios[0].name;
+      draft.productMainPromptText = typeof draft.productMainPromptText === 'string' ? draft.productMainPromptText : '';
+      draft.productMainPrompts = Array.isArray(draft.productMainPrompts)
+        ? draft.productMainPrompts.slice(0, 8).map((item, index) => ({
+            id: item?.id || randomUUID(),
+            title: typeof item?.title === 'string' && item.title.trim() ? item.title.trim() : `主图 ${index + 1}`,
+            prompt: typeof item?.prompt === 'string' ? item.prompt : '',
+          }))
+        : [];
+      const resourceCategories = Array.isArray(parsed.resourceCategories) && parsed.resourceCategories.length > 0
+        ? parsed.resourceCategories.filter((category) => category?.id && category?.name).map((category) => ({
+            id: category.id,
+            name: category.name.trim(),
+            createdAt: category.createdAt || new Date().toISOString(),
+          }))
+        : fallback.resourceCategories;
+      const categoryIds = new Set(resourceCategories.map((category) => category.id));
+      const assets = Array.isArray(parsed.assets) ? parsed.assets.map((asset) => ({
+        ...asset,
+        resourceCategoryId: asset.isLibraryResource && categoryIds.has(asset.resourceCategoryId ?? '')
+          ? asset.resourceCategoryId
+          : asset.isLibraryResource ? resourceCategories[0]?.id : undefined,
+      })) : [];
+      const outputDirectory = typeof parsed.outputDirectory === 'string' && path.isAbsolute(parsed.outputDirectory)
+        ? path.resolve(parsed.outputDirectory)
+        : this.outputRoot;
       return {
         ...fallback,
         ...parsed,
-        version: 2,
+        version: 6,
         settings,
         draft,
-        assets: Array.isArray(parsed.assets) ? parsed.assets : [],
+        assets,
         generations,
         batches: Array.isArray(parsed.batches) ? parsed.batches : [],
         templates: Array.isArray(parsed.templates) ? parsed.templates : fallback.templates,
         tagGroups,
+        resourceCategories,
+        outputDirectory,
       };
     } catch {
-      return defaultState();
+      return defaultState(this.outputRoot);
     }
   }
 
@@ -393,9 +559,20 @@ export class LocalStore {
         baseUrl: service.baseUrl,
         hasApiKey: Boolean(service.apiKeyProtected || service.apiKeyPlain),
       })),
+      activeTextServiceId: this.state.settings.activeTextServiceId,
+      textServices: this.state.settings.textServices.map((service) => ({
+        id: service.id,
+        name: service.name,
+        baseUrl: service.baseUrl,
+        model: service.model,
+        hasApiKey: Boolean(service.apiKeyProtected || service.apiKeyPlain),
+      })),
       imageRatios: this.state.settings.imageRatios.map((preset) => ({ ...preset })),
       hasApiKey: this.state.settings.services.some((service) =>
         service.id === this.state.settings.activeServiceId && Boolean(service.apiKeyProtected || service.apiKeyPlain),
+      ),
+      hasTextApiKey: this.state.settings.textServices.some((service) =>
+        service.id === this.state.settings.activeTextServiceId && Boolean(service.apiKeyProtected || service.apiKeyPlain),
       ),
     };
     return {
@@ -406,6 +583,7 @@ export class LocalStore {
       templates: [...this.state.templates],
       tagGroups: [...this.state.tagGroups],
       draft: this.state.draft,
+      resourceCategories: [...this.state.resourceCategories],
       workspaceDirectory: this.root,
       outputDirectory: this.outputDirectory,
       configFile: this.statePath,
@@ -432,12 +610,35 @@ export class LocalStore {
       if (service.apiKey?.trim()) saveApiKey(next, service.apiKey.trim());
       return next;
     });
+    const existingTextServices = new Map(this.state.settings.textServices.map((service) => [service.id, service]));
+    const textServiceInputs = input.textServices.length > 0 ? input.textServices : [{
+      id: DEFAULT_TEXT_SERVICE_ID,
+      name: '默认AI文字服务',
+      baseUrl: DEFAULT_SERVICE_URL,
+      model: DEFAULT_TEXT_MODEL,
+      apiKey: '',
+    }];
+    const textServices = textServiceInputs.map((service, index) => {
+      const existing = existingTextServices.get(service.id);
+      const next: StoredTextService = {
+        id: service.id || randomUUID(),
+        name: service.name.trim() || `AI文字服务 ${index + 1}`,
+        baseUrl: normalizeBaseUrl(service.baseUrl),
+        model: service.model.trim() || DEFAULT_TEXT_MODEL,
+        apiKeyProtected: existing?.apiKeyProtected ?? '',
+        apiKeyPlain: existing?.apiKeyPlain ?? '',
+      };
+      if (service.apiKey?.trim()) saveApiKey(next, service.apiKey.trim());
+      return next;
+    });
     const next: StoredSettings = {
       ...this.state.settings,
       defaultModel: modelForInvocation(input.defaultModel.trim() || DEFAULT_MODEL, input.invocationMode),
       invocationMode: input.invocationMode,
       activeServiceId: services.some((service) => service.id === input.activeServiceId) ? input.activeServiceId : services[0].id,
       services,
+      activeTextServiceId: textServices.some((service) => service.id === input.activeTextServiceId) ? input.activeTextServiceId : textServices[0].id,
+      textServices,
       imageRatios: normalizeImageRatios(input.imageRatios),
     };
     const ratioOptions = next.imageRatios.map((preset) => preset.name);
@@ -455,6 +656,12 @@ export class LocalStore {
       tasks: this.state.draft.tasks.map((task) => ({ ...task, ratio: normalizeRatio(task.ratio, 1) })),
       detailTasks: this.state.draft.detailTasks?.map((task) => ({ ...task, ratio: normalizeRatio(task.ratio, 1) })),
       outputRatios: [normalizeRatio(this.state.draft.outputRatios?.[0], 1)],
+      skuRatio: normalizeRatio(this.state.draft.skuRatio),
+      skuModel: modelForInvocation(this.state.draft.skuModel || next.defaultModel, next.invocationMode),
+      productMainModel: modelForInvocation(this.state.draft.productMainModel || next.defaultModel, next.invocationMode),
+      productMainRatio: /^[1-9]\d*x[1-9]\d*$/i.test(this.state.draft.productMainRatio ?? '')
+        ? this.state.draft.productMainRatio
+        : normalizeRatio(this.state.draft.productMainRatio),
       queueOutput: normalizeQueueOutput(this.state.draft.queueOutput),
     };
     this.state.templates = this.state.templates.map((template) => template.queueOutput
@@ -486,7 +693,7 @@ export class LocalStore {
     this.persist();
   }
 
-  importAsset(sourcePath: string): AssetRecord {
+  importAsset(sourcePath: string, resourceCategoryId?: string): AssetRecord {
     const extension = path.extname(sourcePath).toLowerCase() || '.png';
     const id = randomUUID();
     const destination = path.join(this.assetDirectory, `${id}${extension}`);
@@ -498,6 +705,8 @@ export class LocalStore {
       mimeType: mimeFromExtension(destination),
       kind: 'reference',
       createdAt: new Date().toISOString(),
+      resourceCategoryId,
+      isLibraryResource: Boolean(resourceCategoryId),
     };
     this.state.assets.unshift(record);
     this.persist();
@@ -530,6 +739,81 @@ export class LocalStore {
 
   getAsset(id: string): AssetRecord | undefined {
     return this.state.assets.find((asset) => asset.id === id);
+  }
+
+  getTextServiceForGeneration(serviceId = this.state.settings.activeTextServiceId): { service: StoredTextService; apiKey: string } {
+    const service = this.state.settings.textServices.find((item) => item.id === serviceId)
+      ?? this.state.settings.textServices.find((item) => item.id === this.state.settings.activeTextServiceId)
+      ?? this.state.settings.textServices[0];
+    if (!service) throw new Error('请先添加 AI 文字服务');
+    return { service, apiKey: readApiKey(service) };
+  }
+
+  saveResourceCategories(categories: ResourceCategory[]): ResourceCategory[] {
+    const seen = new Set<string>();
+    const normalized = categories.flatMap((category) => {
+      const name = category.name.trim();
+      const id = category.id.trim();
+      if (!id || !name || seen.has(id)) return [];
+      seen.add(id);
+      return [{ id, name, createdAt: category.createdAt || new Date().toISOString() }];
+    });
+    if (normalized.length === 0) throw new Error('资源库至少需要保留一个分类');
+    const available = new Set(normalized.map((category) => category.id));
+    this.state.assets = this.state.assets.map((asset) => asset.isLibraryResource && !available.has(asset.resourceCategoryId ?? '')
+      ? { ...asset, resourceCategoryId: normalized[0].id }
+      : asset);
+    this.state.resourceCategories = normalized;
+    this.persist();
+    return [...normalized];
+  }
+
+  updateResource(assetId: string, update: { name?: string; resourceCategoryId?: string; resourceProcessingPrompt?: string }): AssetRecord {
+    const asset = this.state.assets.find((item) => item.id === assetId && item.isLibraryResource);
+    if (!asset) throw new Error('资源不存在');
+    if (update.resourceCategoryId && !this.state.resourceCategories.some((category) => category.id === update.resourceCategoryId)) {
+      throw new Error('目标资源分类不存在');
+    }
+    if (typeof update.name === 'string' && update.name.trim()) asset.name = update.name.trim();
+    if (update.resourceCategoryId) asset.resourceCategoryId = update.resourceCategoryId;
+    if (typeof update.resourceProcessingPrompt === 'string' && update.resourceProcessingPrompt.trim()) {
+      asset.resourceProcessingPrompt = update.resourceProcessingPrompt.trim();
+    }
+    this.persist();
+    return { ...asset };
+  }
+
+  replaceResourceImage(assetId: string, bytes: Buffer, extension: string): AssetRecord {
+    const asset = this.state.assets.find((item) => item.id === assetId && item.isLibraryResource);
+    if (!asset) throw new Error('要替换的资源不存在');
+    if (bytes.length === 0) throw new Error('白底图数据为空，原图未替换');
+    const normalizedExtension = ['.png', '.jpg', '.jpeg', '.webp'].includes(extension.toLowerCase())
+      ? extension.toLowerCase()
+      : '.png';
+    const destination = path.join(this.assetDirectory, `${asset.id}-${Date.now()}${normalizedExtension}`);
+    fs.writeFileSync(destination, bytes);
+    const previousPath = asset.localPath;
+    const updated: AssetRecord = {
+      ...asset,
+      localPath: destination,
+      mimeType: mimeFromExtension(destination),
+    };
+    const replaceReferences = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value)) {
+        value.forEach(replaceReferences);
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      if (record.id === assetId && record.kind === 'reference') Object.assign(record, updated);
+      Object.values(record).forEach(replaceReferences);
+    };
+    replaceReferences(this.state);
+    this.persist();
+    if (path.resolve(previousPath) !== path.resolve(destination)) {
+      try { if (fs.existsSync(previousPath)) fs.unlinkSync(previousPath); } catch { /* The new resource file is already authoritative. */ }
+    }
+    return { ...updated };
   }
 
   readImageAsDataUrl(filePath: string): string {
@@ -593,6 +877,45 @@ export class LocalStore {
     this.persist();
   }
 
+  getGeneration(recordId: string): GenerationRecord | undefined {
+    const record = this.state.generations.find((item) => item.id === recordId);
+    return record ? { ...record } : undefined;
+  }
+
+  setGenerationReview(recordId: string, reviewStatus: GenerationRecord['reviewStatus'] | null): GenerationRecord {
+    const record = this.state.generations.find((item) => item.id === recordId && item.source === 'product-main');
+    if (!record || record.status !== 'success') throw new Error('只能审核已生成成功的 3:4 商品主图');
+    if (reviewStatus) record.reviewStatus = reviewStatus;
+    else delete record.reviewStatus;
+    this.persist();
+    return { ...record };
+  }
+
+  clearProductMainPageRecords(): number {
+    const records = this.state.generations.filter((record) => record.source === 'product-main' && Boolean(record.taskSnapshot?.dimensions?.主图编号) && !record.hiddenFromProductMain);
+    if (records.some((record) => record.status === 'pending')) throw new Error('商品主图仍在生成，请等待当前任务完成后再清空');
+    records.forEach((record) => { record.hiddenFromProductMain = true; });
+    if (records.length > 0) this.persist();
+    return records.length;
+  }
+
+  addGenerationToResource(recordId: string, resourceCategoryId: string): AssetRecord {
+    const record = this.state.generations.find((item) => item.id === recordId && item.status === 'success');
+    if (!record?.outputPath || !fs.existsSync(record.outputPath)) throw new Error('生成图片不存在或已被删除');
+    if (!this.state.resourceCategories.some((category) => category.id === resourceCategoryId)) throw new Error('目标资源分类不存在');
+    const existing = this.state.assets.find((asset) => asset.isLibraryResource && asset.sourceGenerationId === recordId);
+    if (existing) {
+      existing.resourceCategoryId = resourceCategoryId;
+      this.persist();
+      return { ...existing };
+    }
+    const imported = this.importAsset(record.outputPath, resourceCategoryId);
+    const asset = this.state.assets.find((item) => item.id === imported.id)!;
+    asset.sourceGenerationId = recordId;
+    this.persist();
+    return { ...asset };
+  }
+
   pendingGenerations(): GenerationRecord[] {
     return this.state.generations.filter((record) => record.status === 'pending').map((record) => ({ ...record }));
   }
@@ -610,11 +933,23 @@ export class LocalStore {
       ...task,
       references: Object.fromEntries(Object.entries(task.references).map(([key, asset]) => [key, asset && path.resolve(asset.localPath) === normalized ? null : asset])) as typeof task.references,
       detailAssets: task.detailAssets?.filter((asset) => path.resolve(asset.localPath) !== normalized),
+      productAssets: task.productAssets?.filter((asset) => path.resolve(asset.localPath) !== normalized),
+      resourceAssets: task.resourceAssets?.filter((asset) => path.resolve(asset.localPath) !== normalized),
     });
     this.state.draft.tasks = this.state.draft.tasks.map(cleanTask);
     this.state.draft.detailTasks = this.state.draft.detailTasks?.map(cleanTask);
     if (this.state.draft.queueShared.front && path.resolve(this.state.draft.queueShared.front.localPath) === normalized) this.state.draft.queueShared.front = null;
     if (this.state.draft.queueShared.side && path.resolve(this.state.draft.queueShared.side.localPath) === normalized) this.state.draft.queueShared.side = null;
+    this.state.draft.queueSharedResources = this.state.draft.queueSharedResources?.filter((asset) => path.resolve(asset.localPath) !== normalized);
+    this.state.draft.skuReferenceAssets = this.state.draft.skuReferenceAssets?.filter((asset) => path.resolve(asset.localPath) !== normalized);
+    if (this.state.draft.productMainReference && path.resolve(this.state.draft.productMainReference.localPath) === normalized) this.state.draft.productMainReference = null;
+    this.state.draft.workbenchNodes = this.state.draft.workbenchNodes?.map((node) => ({
+      ...node,
+      referenceAssetIds: node.referenceAssetIds.filter((assetId) => this.state.assets.some((asset) => asset.id === assetId)),
+    }));
+    this.state.generations = this.state.generations.map((record) => record.taskSnapshot
+      ? { ...record, taskSnapshot: cleanTask(record.taskSnapshot) }
+      : record);
     this.state.templates = this.state.templates.map((template) => ({
       ...template,
       sharedFront: template.sharedFront && path.resolve(template.sharedFront.localPath) === normalized ? null : template.sharedFront,
@@ -622,6 +957,71 @@ export class LocalStore {
     }));
     this.persist();
     return beforeAssets !== this.state.assets.length || beforeGenerations !== this.state.generations.length;
+  }
+
+  moveOutputDirectory(targetDirectory: string): string {
+    const oldDirectory = path.resolve(this.outputRoot);
+    const target = path.resolve(targetDirectory);
+    const comparableOld = process.platform === 'win32' ? oldDirectory.toLowerCase() : oldDirectory;
+    const comparableTarget = process.platform === 'win32' ? target.toLowerCase() : target;
+    if (comparableTarget === comparableOld) return target;
+    if (comparableTarget.startsWith(`${comparableOld}${path.sep}`)) throw new Error('新的输出目录不能放在当前输出目录内部');
+
+    fs.mkdirSync(target, { recursive: true });
+    const files: string[] = [];
+    const pendingDirectories = [oldDirectory];
+    while (pendingDirectories.length > 0) {
+      const directory = pendingDirectories.pop()!;
+      if (!fs.existsSync(directory)) continue;
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const entryPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) pendingDirectories.push(entryPath);
+        else if (entry.isFile()) files.push(entryPath);
+      }
+    }
+
+    const copied: string[] = [];
+    const destinations = new Map<string, string>();
+    const previousRecords = this.state.generations;
+    const previousOutputDirectory = this.state.outputDirectory;
+    try {
+      for (const sourcePath of files) {
+        const relativePath = path.relative(oldDirectory, sourcePath);
+        const relativeDirectory = path.dirname(relativePath);
+        const parsed = path.parse(relativePath);
+        const destinationDirectory = path.join(target, relativeDirectory === '.' ? '' : relativeDirectory);
+        fs.mkdirSync(destinationDirectory, { recursive: true });
+        let destination = path.join(destinationDirectory, parsed.base);
+        let suffix = 1;
+        while (fs.existsSync(destination)) {
+          destination = path.join(destinationDirectory, `${parsed.name} (${suffix})${parsed.ext}`);
+          suffix += 1;
+        }
+        fs.copyFileSync(sourcePath, destination, fs.constants.COPYFILE_EXCL);
+        copied.push(destination);
+        destinations.set(path.resolve(sourcePath), destination);
+      }
+      this.state.generations = this.state.generations.map((record) => {
+        if (!record.outputPath) return record;
+        const destination = destinations.get(path.resolve(record.outputPath));
+        return destination ? { ...record, outputPath: destination } : record;
+      });
+      this.state.outputDirectory = target;
+      this.outputRoot = target;
+      this.persist();
+      destinations.forEach((_destination, sourcePath) => {
+        try { if (fs.existsSync(sourcePath)) fs.unlinkSync(sourcePath); } catch { /* The migrated copy is already authoritative. */ }
+      });
+      return target;
+    } catch (error) {
+      this.state.generations = previousRecords;
+      this.state.outputDirectory = previousOutputDirectory;
+      this.outputRoot = oldDirectory;
+      copied.forEach((filePath) => {
+        try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* Keep rollback best-effort. */ }
+      });
+      throw error;
+    }
   }
 
   getBatch(batchId: string): BatchRecord | undefined {
