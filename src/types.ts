@@ -1,11 +1,13 @@
 export type InvocationMode = 'async' | 'sync';
 export type GenerationSource = 'single' | 'batch' | 'template' | 'workbench' | 'stamp' | 'garment3d' | 'detail' | 'detail-generate';
-export type PageId = 'studio' | 'workbench' | 'templates' | 'assets' | 'stamp' | 'garment3d' | 'detail-generate' | 'detail' | 'tags' | 'batches' | 'settings';
+export type PageId = 'studio' | 'workbench' | 'templates' | 'assets' | 'prompt-tools' | 'stamp' | 'garment3d' | 'detail-generate' | 'detail' | 'tags' | 'batches' | 'settings';
 
 export interface PublicSettings {
   defaultModel: string;
   invocationMode: InvocationMode;
   hasApiKey: boolean;
+  textModel: string;
+  hasTextApiKey: boolean;
 }
 
 export interface AssetRecord {

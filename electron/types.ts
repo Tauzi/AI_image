@@ -5,11 +5,16 @@ export interface PublicSettings {
   defaultModel: string;
   invocationMode: InvocationMode;
   hasApiKey: boolean;
+  textModel: string;
+  hasTextApiKey: boolean;
 }
 
-export interface StoredSettings extends Omit<PublicSettings, 'hasApiKey'> {
+export interface StoredSettings extends Omit<PublicSettings, 'hasApiKey' | 'hasTextApiKey'> {
+  textApiBaseUrl: string;
   apiKeyProtected: string;
   apiKeyPlain: string;
+  textApiKeyProtected: string;
+  textApiKeyPlain: string;
 }
 
 export interface AssetRecord {

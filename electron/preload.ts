@@ -10,7 +10,7 @@ import type {
 
 contextBridge.exposeInMainWorld('imageStudio', {
   getSnapshot: () => ipcRenderer.invoke('app:get-snapshot'),
-  saveSettings: (settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }) =>
+  saveSettings: (settings: Omit<PublicSettings, 'hasApiKey' | 'hasTextApiKey'> & { apiKey?: string; textApiKey?: string }) =>
     ipcRenderer.invoke('settings:save', settings),
   saveDraft: (draft: DraftState) => ipcRenderer.invoke('draft:save', draft),
   saveTemplates: (templates: PromptTemplate[]) => ipcRenderer.invoke('templates:save', templates),
@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('imageStudio', {
   pickImages: () => ipcRenderer.invoke('asset:pick-images'),
   saveDataImage: (dataUrl: string, name: string) => ipcRenderer.invoke('asset:save-data-image', dataUrl, name),
   readImage: (localPath: string) => ipcRenderer.invoke('asset:read-image', localPath),
+  runPromptTool: (request: { mode: 'reverse'; imagePath: string } | { mode: 'expand'; prompt: string }) =>
+    ipcRenderer.invoke('prompt-tools:run', request),
   useGenerationAsReference: (localPath: string) => ipcRenderer.invoke('asset:use-generation', localPath),
   startGeneration: (request: StartGenerationRequest) => ipcRenderer.invoke('generation:start', request),
   openWorkspaceDirectory: () => ipcRenderer.invoke('workspace:open-directory'),

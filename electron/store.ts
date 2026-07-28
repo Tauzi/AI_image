@@ -18,6 +18,8 @@ import type {
 import { createDefaultTagGroups } from './default-tags';
 
 const DEFAULT_MODEL = 'gpt-image-2-async';
+const DEFAULT_TEXT_API_BASE_URL = 'https://mianyunai.com/v1';
+const DEFAULT_TEXT_MODEL = 'gpt-5.6-sol';
 const LEGACY_SHARED_DIMENSIONS = ['图片类型', '展示方式', '模特类型', '动作', '核心卖点', '适用场景', '背景', '视觉风格', '文案排版'];
 
 function modelForInvocation(model: string, invocationMode: StoredSettings['invocationMode']): string {
@@ -146,6 +148,10 @@ function defaultState(): StoredState {
       invocationMode: 'async',
       apiKeyProtected: '',
       apiKeyPlain: '',
+      textApiBaseUrl: DEFAULT_TEXT_API_BASE_URL,
+      textModel: DEFAULT_TEXT_MODEL,
+      textApiKeyProtected: '',
+      textApiKeyPlain: '',
     },
     assets: [],
     generations: [],
@@ -231,6 +237,8 @@ export class LocalStore {
       if (!settings.defaultModel || ['gpt-image-1', 'dall-e-3'].includes(settings.defaultModel)) settings.defaultModel = DEFAULT_MODEL;
       if (!['async', 'sync'].includes(settings.invocationMode)) settings.invocationMode = 'async';
       settings.defaultModel = modelForInvocation(settings.defaultModel, settings.invocationMode);
+      settings.textApiBaseUrl = settings.textApiBaseUrl?.trim() || DEFAULT_TEXT_API_BASE_URL;
+      settings.textModel = settings.textModel?.trim() || DEFAULT_TEXT_MODEL;
       const draft = {
         ...fallback.draft,
         ...parsed.draft,
@@ -298,6 +306,8 @@ export class LocalStore {
       defaultModel: this.state.settings.defaultModel,
       invocationMode: this.state.settings.invocationMode,
       hasApiKey: Boolean(this.state.settings.apiKeyProtected || this.state.settings.apiKeyPlain),
+      textModel: this.state.settings.textModel,
+      hasTextApiKey: Boolean(this.state.settings.textApiKeyProtected || this.state.settings.textApiKeyPlain),
     };
     return {
       settings,
@@ -313,11 +323,13 @@ export class LocalStore {
     };
   }
 
-  updateSettings(input: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }): PublicSettings {
+  updateSettings(input: Omit<PublicSettings, 'hasApiKey' | 'hasTextApiKey'> & { apiKey?: string; textApiKey?: string }): PublicSettings {
     const next: StoredSettings = {
       ...this.state.settings,
       defaultModel: modelForInvocation(input.defaultModel.trim() || DEFAULT_MODEL, input.invocationMode),
       invocationMode: input.invocationMode,
+      textApiBaseUrl: this.state.settings.textApiBaseUrl?.trim() || DEFAULT_TEXT_API_BASE_URL,
+      textModel: input.textModel.trim() || DEFAULT_TEXT_MODEL,
     };
     if (input.apiKey?.trim()) {
       const apiKey = input.apiKey.trim();
@@ -327,6 +339,16 @@ export class LocalStore {
       } else {
         next.apiKeyPlain = apiKey;
         next.apiKeyProtected = '';
+      }
+    }
+    if (input.textApiKey?.trim()) {
+      const apiKey = input.textApiKey.trim();
+      if (safeStorage.isEncryptionAvailable()) {
+        next.textApiKeyProtected = safeStorage.encryptString(apiKey).toString('base64');
+        next.textApiKeyPlain = '';
+      } else {
+        next.textApiKeyPlain = apiKey;
+        next.textApiKeyProtected = '';
       }
     }
     this.state.settings = next;
@@ -344,6 +366,22 @@ export class LocalStore {
       }
     }
     return { settings: this.state.settings, apiKey };
+  }
+
+  getTextServiceSettings(): { baseUrl: string; model: string; apiKey: string } {
+    let apiKey = this.state.settings.textApiKeyPlain;
+    if (this.state.settings.textApiKeyProtected) {
+      try {
+        apiKey = safeStorage.decryptString(Buffer.from(this.state.settings.textApiKeyProtected, 'base64'));
+      } catch {
+        apiKey = '';
+      }
+    }
+    return {
+      baseUrl: this.state.settings.textApiBaseUrl,
+      model: this.state.settings.textModel,
+      apiKey,
+    };
   }
 
   saveDraft(draft: DraftState): void {

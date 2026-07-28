@@ -90,13 +90,14 @@ const PAGE_META: Record<PageId, { title: string; subtitle: string }> = {
   workbench: { title: '生图工作台', subtitle: '选择标签组合提示词，在画布中持续迭代图片' },
   templates: { title: '提示词模板', subtitle: '保存稳定的视觉配方并快速复用' },
   assets: { title: '资产库', subtitle: '集中浏览全部生成图片，并按来源、模型与日期快速筛选' },
+  'prompt-tools': { title: 'AI 提示词', subtitle: '从参考图提炼视觉语言，或扩写润色创作想法' },
   stamp: { title: '精准产品贴标', subtitle: '自由定位 Logo，自动去除底色并融合到服装或包包表面' },
   garment3d: { title: '3D服装白底图', subtitle: '将服装参考图生成居中的立体白底产品展示图' },
   'detail-generate': { title: '详情页生成', subtitle: '上传产品图并生成完整的电商详情页图片组' },
   detail: { title: '详情页重排', subtitle: '批量上传详情图，以共享或独立提示词生成全新排版' },
   tags: { title: '标签管理', subtitle: '管理可选择并替换到生图提示词中的标签' },
   batches: { title: '批次记录', subtitle: '追踪每次批量任务的完成情况' },
-  settings: { title: '服务设置', subtitle: '配置卡密、调用模式与本地工作目录' },
+  settings: { title: '服务设置', subtitle: '配置生图、AI 文字服务与本地工作目录' },
 };
 
 function normalizedGenerationRatios(values: string[] | undefined, fallback: string): string[] {
@@ -208,6 +209,8 @@ function emptySnapshot(): AppSnapshot {
       defaultModel: 'gpt-image-2-async',
       invocationMode: 'async',
       hasApiKey: false,
+      textModel: 'gpt-5.6-sol',
+      hasTextApiKey: false,
     },
     assets: [],
     generations: [],
@@ -288,6 +291,7 @@ function Sidebar({ page, onChange }: { page: PageId; onChange: (page: PageId) =>
     { id: 'workbench', label: '生图台', icon: Paintbrush },
     { id: 'templates', label: '模板', icon: Layers3 },
     { id: 'assets', label: '资产库', icon: Archive },
+    { id: 'prompt-tools', label: 'AI提示词', icon: WandSparkles },
     { id: 'stamp', label: '贴标', icon: Tag },
     { id: 'garment3d', label: '3D白底', icon: Boxes },
     { id: 'detail-generate', label: '详情页生成', icon: ImagePlus },
@@ -336,7 +340,8 @@ function Topbar({
   onMode: (mode: DraftState['mode']) => void;
 }) {
   const meta = PAGE_META[page];
-  const apiReady = settings.hasApiKey;
+  const usesTextService = page === 'prompt-tools';
+  const apiReady = usesTextService ? settings.hasTextApiKey : settings.hasApiKey;
   return (
     <header className="topbar">
       <div className="page-title">
@@ -351,7 +356,9 @@ function Topbar({
         </div>
       )}
       <button className={apiReady ? 'api-state ready' : 'api-state'} onClick={onSettings}>
-        {settings.hasApiKey ? `${settings.invocationMode === 'async' ? '异步' : '同步'}服务已配置` : '卡密未配置'}
+        {usesTextService
+          ? settings.hasTextApiKey ? `${settings.textModel} 已配置` : '文字服务未配置'
+          : settings.hasApiKey ? `${settings.invocationMode === 'async' ? '异步' : '同步'}服务已配置` : '卡密未配置'}
       </button>
     </header>
   );
@@ -2177,6 +2184,139 @@ function BatchesPage({ snapshot, onRefresh, onNotice }: { snapshot: AppSnapshot;
   );
 }
 
+function PromptToolsPage({
+  settings,
+  onOpenSettings,
+  onNotice,
+  onAsset,
+}: {
+  settings: PublicSettings;
+  onOpenSettings: () => void;
+  onNotice: (message: string) => void;
+  onAsset: (asset: AssetRecord) => void;
+}) {
+  const [mode, setMode] = useState<'reverse' | 'expand'>('reverse');
+  const [image, setImage] = useState<AssetRecord | null>(null);
+  const [reverseResult, setReverseResult] = useState('');
+  const [expandInput, setExpandInput] = useState('');
+  const [expandResult, setExpandResult] = useState('');
+  const [running, setRunning] = useState(false);
+
+  const requireTextService = () => {
+    if (settings.hasTextApiKey) return true;
+    onNotice('请先配置文字服务卡密');
+    onOpenSettings();
+    return false;
+  };
+  const pickImage = async () => {
+    const asset = await window.imageStudio.pickImage();
+    if (!asset) return;
+    setImage(asset);
+    setReverseResult('');
+    onAsset(asset);
+  };
+  const reverse = async () => {
+    if (!image) {
+      onNotice('请先上传需要分析的图片');
+      return;
+    }
+    if (!requireTextService()) return;
+    setRunning(true);
+    try {
+      setReverseResult(await window.imageStudio.runPromptTool({ mode: 'reverse', imagePath: image.localPath }));
+      onNotice('图片提示词反推完成');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '图片提示词反推失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+  const expand = async () => {
+    if (!expandInput.trim()) {
+      onNotice('请输入需要扩写的提示词');
+      return;
+    }
+    if (!requireTextService()) return;
+    setRunning(true);
+    try {
+      setExpandResult(await window.imageStudio.runPromptTool({ mode: 'expand', prompt: expandInput }));
+      onNotice('提示词扩写完成');
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : '提示词扩写失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+  const copyPrompt = async (value: string) => {
+    if (!value.trim()) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      onNotice('提示词已复制');
+    } catch {
+      onNotice('复制失败，请手动选择文本复制');
+    }
+  };
+  const sendToExpand = () => {
+    setExpandInput(reverseResult);
+    setMode('expand');
+  };
+
+  return (
+    <div className="prompt-tools-page">
+      <div className="prompt-tools-toolbar">
+        <div className="prompt-mode-tabs" role="tablist" aria-label="AI 提示词模式">
+          <button type="button" role="tab" aria-selected={mode === 'reverse'} className={mode === 'reverse' ? 'selected' : ''} onClick={() => setMode('reverse')}><ImagePlus size={16} />图片反推</button>
+          <button type="button" role="tab" aria-selected={mode === 'expand'} className={mode === 'expand' ? 'selected' : ''} onClick={() => setMode('expand')}><WandSparkles size={16} />提示词扩写</button>
+        </div>
+        <button type="button" className={settings.hasTextApiKey ? 'prompt-service-state ready' : 'prompt-service-state'} onClick={onOpenSettings}><span />{settings.textModel}</button>
+      </div>
+
+      {mode === 'reverse' ? (
+        <div className="prompt-tools-workspace">
+          <section className="prompt-tool-panel image-analysis-panel">
+            <header><div><h2>参考图片</h2><span>{image?.name || '尚未选择图片'}</span></div>{image && <button type="button" className="icon-button" title="移除图片" onClick={() => { setImage(null); setReverseResult(''); }}><X size={16} /></button>}</header>
+            <button type="button" className={image ? 'prompt-image-picker has-image' : 'prompt-image-picker'} onClick={pickImage}>
+              {image ? <LocalImage asset={image} alt={image.name} /> : <><span><ImagePlus size={28} /></span><strong>选择图片</strong><small>PNG、JPG、JPEG 或 WebP</small></>}
+            </button>
+            <div className="prompt-panel-actions">
+              <button type="button" className="secondary" onClick={pickImage}><RefreshCw size={15} />{image ? '替换图片' : '选择图片'}</button>
+              <button type="button" className="primary" disabled={!image || running} onClick={reverse}>{running ? <LoaderCircle size={16} className="spin" /> : <WandSparkles size={16} />}{running ? '分析中' : '一键反推'}</button>
+            </div>
+          </section>
+
+          <section className="prompt-tool-panel prompt-result-panel">
+            <header><div><h2>中文提示词</h2><span>{reverseResult ? `${reverseResult.length} 字符` : '等待生成'}</span></div><button type="button" className="icon-button" title="复制提示词" disabled={!reverseResult} onClick={() => copyPrompt(reverseResult)}><Copy size={16} /></button></header>
+            <textarea value={reverseResult} onChange={(event) => setReverseResult(event.target.value)} placeholder="反推后的通用中文提示词会显示在这里" />
+            <div className="prompt-panel-actions result-actions">
+              <button type="button" className="secondary" disabled={!reverseResult} onClick={() => copyPrompt(reverseResult)}><Copy size={15} />复制</button>
+              <button type="button" className="primary" disabled={!reverseResult} onClick={sendToExpand}>继续扩写<ArrowRight size={15} /></button>
+            </div>
+          </section>
+        </div>
+      ) : (
+        <div className="prompt-tools-workspace">
+          <section className="prompt-tool-panel prompt-input-panel">
+            <header><div><h2>原始提示词</h2><span>{expandInput.length} 字符</span></div>{expandInput && <button type="button" className="icon-button" title="清空提示词" onClick={() => { setExpandInput(''); setExpandResult(''); }}><X size={16} /></button>}</header>
+            <textarea autoFocus value={expandInput} onChange={(event) => setExpandInput(event.target.value)} placeholder="输入主体、场景或画面想法" />
+            <div className="prompt-panel-actions single-action">
+              <button type="button" className="primary" disabled={!expandInput.trim() || running} onClick={expand}>{running ? <LoaderCircle size={16} className="spin" /> : <WandSparkles size={16} />}{running ? '扩写中' : '一键扩写'}</button>
+            </div>
+          </section>
+
+          <section className="prompt-tool-panel prompt-result-panel">
+            <header><div><h2>润色结果</h2><span>{expandResult ? `${expandResult.length} 字符` : '等待生成'}</span></div><button type="button" className="icon-button" title="复制提示词" disabled={!expandResult} onClick={() => copyPrompt(expandResult)}><Copy size={16} /></button></header>
+            <textarea value={expandResult} onChange={(event) => setExpandResult(event.target.value)} placeholder="扩写润色后的提示词会显示在这里" />
+            <div className="prompt-panel-actions result-actions">
+              <button type="button" className="secondary" disabled={!expandResult} onClick={() => copyPrompt(expandResult)}><Copy size={15} />复制</button>
+              <button type="button" className="primary" disabled={!expandInput.trim() || running} onClick={expand}><RefreshCw size={15} />重新扩写</button>
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsPage({
   settings,
   workspaceDirectory,
@@ -2190,7 +2330,7 @@ function SettingsPage({
   configFile: string;
   onSaved: (settings: PublicSettings) => void;
 }) {
-  const [form, setForm] = useState({ ...settings, apiKey: '' });
+  const [form, setForm] = useState({ ...settings, apiKey: '', textApiKey: '' });
   const [saving, setSaving] = useState(false);
   const [settingsUnlocked, setSettingsUnlocked] = useState(false);
   const [accessPassword, setAccessPassword] = useState('');
@@ -2212,9 +2352,11 @@ function SettingsPage({
         defaultModel: form.defaultModel,
         invocationMode: form.invocationMode,
         apiKey: form.apiKey,
+        textModel: form.textModel,
+        textApiKey: form.textApiKey,
       });
       onSaved(result);
-      setForm((current) => ({ ...current, ...result, apiKey: '' }));
+      setForm((current) => ({ ...current, ...result, apiKey: '', textApiKey: '' }));
     } finally {
       setSaving(false);
     }
@@ -2223,7 +2365,7 @@ function SettingsPage({
     return <div className="settings-lock-page"><form className="settings-lock-card" onSubmit={unlockSettings}>
       <div className="settings-lock-icon"><LockKeyhole size={24} /></div>
       <h2>设置已锁定</h2>
-      <p>输入设置密码后查看和修改卡密及工作目录。</p>
+      <p>输入设置密码后查看和修改服务卡密及工作目录。</p>
       <label>设置密码<input type="password" autoFocus autoComplete="current-password" value={accessPassword} onChange={(event) => { setAccessPassword(event.target.value); setAccessError(''); }} placeholder="请输入密码" /></label>
       {accessError && <div className="settings-lock-error">{accessError}</div>}
       <button type="submit" className="primary" disabled={!accessPassword}>进入设置</button>
@@ -2238,6 +2380,14 @@ function SettingsPage({
           <label>调用模式<select value={form.invocationMode} onChange={(event) => setForm({ ...form, invocationMode: event.target.value as PublicSettings['invocationMode'] })}><option value="async">异步模式（默认）</option><option value="sync">同步模式</option></select></label>
           <label>默认模型<input value={form.defaultModel} onChange={(event) => setForm({ ...form, defaultModel: event.target.value })} /></label>
           <button type="button" className="primary save-settings" onClick={save} disabled={saving}><Save size={16} />{saving ? '保存中' : '保存设置'}</button>
+        </div>
+      </section>
+      <section className="settings-section text-service-settings">
+        <div className="settings-heading"><div className="settings-icon"><WandSparkles size={18} /></div><div><h2>AI 文字服务</h2><p>OpenAI 兼容接口，用于图片反推与提示词扩写</p></div></div>
+        <div className="settings-form">
+          <label>文字模型<input value={form.textModel} onChange={(event) => setForm({ ...form, textModel: event.target.value })} placeholder="gpt-5.6-sol" /></label>
+          <label>文字服务卡密<input type="password" autoComplete="off" value={form.textApiKey} onChange={(event) => setForm({ ...form, textApiKey: event.target.value })} placeholder={form.hasTextApiKey ? '已安全保存，留空则不修改' : '输入卡密（API Key）'} /></label>
+          <button type="button" className="primary save-settings" onClick={save} disabled={saving}><Save size={16} />{saving ? '保存中' : '保存服务设置'}</button>
         </div>
       </section>
       <section className="settings-section workspace-settings">
@@ -2497,6 +2647,7 @@ export default function App() {
           {page === 'workbench' && <WorkbenchPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'templates' && <TemplatesPage snapshot={snapshot} draft={draft} onSave={saveTemplates} onApply={applyTemplate} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
           {page === 'assets' && <AssetsPage generations={snapshot.generations} />}
+          {page === 'prompt-tools' && <PromptToolsPage settings={snapshot.settings} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAsset={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}
           {page === 'stamp' && <StampPage snapshot={snapshot} draft={draft} onDraft={updateDraft} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'garment3d' && <Garment3DPage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} />}
           {page === 'detail-generate' && <DetailGeneratePage snapshot={snapshot} onRefresh={refresh} onOpenSettings={() => setPage('settings')} onNotice={setNotice} onAssets={(asset) => setSnapshot((current) => ({ ...current, assets: [asset, ...current.assets] }))} />}

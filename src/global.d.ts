@@ -15,7 +15,7 @@ declare global {
     imageStudio: {
       getSnapshot: () => Promise<AppSnapshot>;
       saveSettings: (
-        settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string },
+        settings: Omit<PublicSettings, 'hasApiKey' | 'hasTextApiKey'> & { apiKey?: string; textApiKey?: string },
       ) => Promise<PublicSettings>;
       saveDraft: (draft: DraftState) => Promise<void>;
       saveTemplates: (templates: PromptTemplate[]) => Promise<void>;
@@ -26,6 +26,7 @@ declare global {
       pickImages: () => Promise<AssetRecord[]>;
       saveDataImage: (dataUrl: string, name: string) => Promise<AssetRecord>;
       readImage: (localPath: string) => Promise<string>;
+      runPromptTool: (request: { mode: 'reverse'; imagePath: string } | { mode: 'expand'; prompt: string }) => Promise<string>;
       useGenerationAsReference: (localPath: string) => Promise<AssetRecord>;
       startGeneration: (request: {
         batchTag: string;

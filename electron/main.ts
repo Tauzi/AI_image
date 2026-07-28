@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { generateImage, modelForInvocation, resumeImageTask } from './image-api';
 import { LocalStore } from './store';
+import { runPromptTool } from './text-api';
 import type {
   DraftState,
   GenerationRecord,
@@ -294,7 +295,7 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   store = new LocalStore();
   ipcMain.handle('app:get-snapshot', () => store.snapshot());
-  ipcMain.handle('settings:save', (_event, settings: Omit<PublicSettings, 'hasApiKey'> & { apiKey?: string }) =>
+  ipcMain.handle('settings:save', (_event, settings: Omit<PublicSettings, 'hasApiKey' | 'hasTextApiKey'> & { apiKey?: string; textApiKey?: string }) =>
     store.updateSettings(settings),
   );
   ipcMain.handle('draft:save', (_event, draft: DraftState) => store.saveDraft(draft));
@@ -331,6 +332,15 @@ app.whenReady().then(() => {
     });
   });
   ipcMain.handle('asset:read-image', (_event, localPath: string) => store.readImageAsDataUrl(localPath));
+  ipcMain.handle('prompt-tools:run', async (_event, request: { mode: 'reverse'; imagePath: string } | { mode: 'expand'; prompt: string }) => {
+    const settings = store.getTextServiceSettings();
+    if (request.mode === 'reverse') {
+      if (!request.imagePath) throw new Error('请先上传需要分析的图片');
+      return runPromptTool({ mode: 'reverse', imageDataUrl: store.readImageAsDataUrl(request.imagePath) }, settings);
+    }
+    if (!request.prompt.trim()) throw new Error('请输入需要扩写的提示词');
+    return runPromptTool({ mode: 'expand', prompt: request.prompt }, settings);
+  });
   ipcMain.handle('asset:save-data-image', (_event, dataUrl: string, name: string) => {
     const asset = store.saveDataImage(dataUrl, name);
     return { ...asset, preview: store.readImageAsDataUrl(asset.localPath) };
